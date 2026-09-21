@@ -269,15 +269,13 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int) {
         ) {
             Column(Modifier.weight(1f)) {
                 Text(label, color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = if (snapshot.connected) {
-                        "запусков: ${snapshot.startCounter}"
-                    } else {
-                        "Ошибка: ${snapshot.lastError ?: "нет соединения"}"
-                    },
-                    color = Color.White
-                )
+                if (!snapshot.connected) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Ошибка: ${snapshot.lastError ?: "нет соединения"}",
+                        color = Color.White
+                    )
+                }
                 when {
                     snapshot.alarmActive -> {
                         Spacer(Modifier.height(4.dp))

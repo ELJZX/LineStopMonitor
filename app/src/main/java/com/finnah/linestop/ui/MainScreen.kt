@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,13 +21,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,13 +42,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.finnah.linestop.LineStopViewModel
 import com.finnah.linestop.data.AlarmRecord
-import com.finnah.linestop.data.ShiftRecord
 import com.finnah.linestop.plc.PlcSnapshot
 import com.finnah.linestop.util.formatDuration
 import com.finnah.linestop.util.formatShortTime
 import com.finnah.linestop.util.formatTime
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(vm: LineStopViewModel) {
     val snapshot by vm.snapshot.collectAsStateWithLifecycle()
@@ -60,6 +58,7 @@ fun MainScreen(vm: LineStopViewModel) {
     val port by vm.port.collectAsStateWithLifecycle()
 
     var showSettings by remember { mutableStateOf(false) }
+    var showAccess by remember { mutableStateOf(false) }
     var showLogs by remember { mutableStateOf(false) }
     var showOperator by remember { mutableStateOf(false) }
     var showEndShift by remember { mutableStateOf(false) }
@@ -71,18 +70,40 @@ fun MainScreen(vm: LineStopViewModel) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Мониторинг аварий линии") },
-                actions = {
+            Surface(shadowElevation = 2.dp) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
                         text = if (snapshot.connected) "Связь: $ip:$port" else "Нет связи",
                         color = if (snapshot.connected) Color(0xFF2E7D32) else Color(0xFFC62828),
-                        modifier = Modifier.padding(end = 8.dp)
+                        fontWeight = FontWeight.Bold
                     )
+
+                    Spacer(Modifier.weight(1f))
+
+                    val currentShift = shift
+                    if (currentShift == null) {
+                        Button(onClick = { showOperator = true }) { Text("Начать работу") }
+                    } else {
+                        Text(
+                            text = "Оператор: ${currentShift.operator} · " +
+                                    "с ${formatShortTime(currentShift.startTime)} · " +
+                                    formatDuration(currentShift.duration(snapshot.lastUpdate))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = { showEndShift = true }) { Text("Закончить работу") }
+                    }
+
+                    Spacer(Modifier.width(8.dp))
                     TextButton(onClick = { vm.refreshLogs(); showLogs = true }) { Text("Журнал") }
-                    TextButton(onClick = { showSettings = true }) { Text("Настройки") }
+                    TextButton(onClick = { showAccess = true }) { Text("Настройки") }
                 }
-            )
+            }
         }
     ) { padding ->
         Column(
@@ -92,15 +113,7 @@ fun MainScreen(vm: LineStopViewModel) {
                 .padding(16.dp)
         ) {
             StatusCard(snapshot, openAlarms.size)
-            Spacer(Modifier.height(12.dp))
-
-            ShiftRow(
-                shift = shift,
-                now = snapshot.lastUpdate,
-                onStart = { showOperator = true },
-                onEnd = { showEndShift = true }
-            )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
 
             if (openAlarms.isNotEmpty()) {
                 Text(
@@ -150,6 +163,16 @@ fun MainScreen(vm: LineStopViewModel) {
             alarm = alarm,
             onConfirm = { code, text -> vm.acknowledge(alarm.id, code, text) },
             onDismiss = { vm.dismissDialog() }
+        )
+    }
+
+    if (showAccess) {
+        AccessDialog(
+            onSuccess = {
+                showAccess = false
+                showSettings = true
+            },
+            onDismiss = { showAccess = false }
         )
     }
 
@@ -283,47 +306,6 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int) {
                     fontSize = 120.sp,
                     fontWeight = FontWeight.Bold
                 )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ShiftRow(
-    shift: ShiftRecord?,
-    now: Long,
-    onStart: () -> Unit,
-    onEnd: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                if (shift == null) {
-                    Text("Смена не начата", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Нажмите «Начать работу», чтобы открыть смену оператора",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                } else {
-                    Text("Оператор: ${shift.operator}", fontWeight = FontWeight.Bold)
-                    Text(
-                        "Смена с ${formatShortTime(shift.startTime)} · " +
-                                "длительность ${formatDuration(shift.duration(now))}",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-            Spacer(Modifier.width(12.dp))
-            Button(onClick = if (shift == null) onStart else onEnd) {
-                Text(if (shift == null) "Начать работу" else "Закончить работу")
             }
         }
     }

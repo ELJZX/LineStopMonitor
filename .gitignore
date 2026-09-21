@@ -1,0 +1,29 @@
+# Android / Gradle
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Локальные настройки (путь к SDK)
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.hprof
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+Thumbs.db
+.DS_Store

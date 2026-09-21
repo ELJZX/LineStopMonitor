@@ -249,6 +249,13 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int) {
             icon = "!"
         }
 
+        openCount > 0 -> {
+            // линия работает, но есть незаполненные причины аварий
+            label = "ЛИНИЯ В РАБОТЕ"
+            color = Color(0xFFF9A825)
+            icon = "✔"
+        }
+
         else -> {
             label = "ЛИНИЯ В РАБОТЕ"
             color = Color(0xFF2E7D32)

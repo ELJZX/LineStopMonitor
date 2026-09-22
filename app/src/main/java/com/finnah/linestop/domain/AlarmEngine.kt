@@ -95,6 +95,7 @@ object AlarmEngine {
         alarms: List<AlarmRecord>,
         alarmId: Long,
         causeCode: Int,
+        causePath: String?,
         causeText: String?
     ): List<AlarmRecord> {
         if (alarms.none { it.id == alarmId }) return alarms
@@ -102,6 +103,7 @@ object AlarmEngine {
             if (it.id == alarmId) {
                 it.copy(
                     causeCode = causeCode,
+                    causePath = causePath,
                     causeText = causeText?.trim()?.takeIf { t -> t.isNotEmpty() },
                     closed = true,
                     ackPending = true,

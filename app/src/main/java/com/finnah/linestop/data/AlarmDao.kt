@@ -35,6 +35,7 @@ class AlarmDao(private val db: AppDatabase) {
         put("duration_ms", a.durationMs)
         put("cause_code", a.causeCode)
         put("cause_text", a.causeText)
+        put("cause_path", a.causePath)
         put("closed", if (a.closed) 1 else 0)
         put("dialog_shown", if (a.dialogShown) 1 else 0)
         put("ack_pending", if (a.ackPending) 1 else 0)
@@ -49,6 +50,7 @@ class AlarmDao(private val db: AppDatabase) {
         durationMs = c.getLongOrNull("duration_ms"),
         causeCode = c.getIntOrNull("cause_code"),
         causeText = c.getStringOrNull("cause_text"),
+        causePath = c.getStringOrNull("cause_path"),
         closed = c.getInt(c.getColumnIndexOrThrow("closed")) != 0,
         dialogShown = c.getInt(c.getColumnIndexOrThrow("dialog_shown")) != 0,
         ackPending = c.getInt(c.getColumnIndexOrThrow("ack_pending")) != 0,

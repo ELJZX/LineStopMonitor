@@ -42,6 +42,7 @@ def main():
     print("Монитор ПЛК %s:%d  (Ctrl+C для выхода)" % (args.host, args.port))
     print("-" * 70)
 
+    prev_hb = None
     printed = 0
     while True:
         try:
@@ -49,6 +50,7 @@ def main():
                 client.connect()
                 print("подключено к %s:%d" % (args.host, args.port))
             regs = client.read_holding_registers(MODBUS_D_BASE, 6)
+            heartbeat = client.read_holding_registers(MODBUS_D_BASE + 103, 1)[0]
         except Exception as exc:
             print("нет связи: %s" % exc)
             client.close()
@@ -56,9 +58,19 @@ def main():
             continue
 
         state = "АВАРИЯ" if regs[0] else "работа"
+        if heartbeat is None:
+            plc_state = ""
+        elif prev_hb is None:
+            plc_state = "D103=%d" % heartbeat
+        elif heartbeat != prev_hb:
+            plc_state = "программа ПЛК выполняется (D103=%d)" % heartbeat
+        else:
+            plc_state = "!! D103 не растёт — программа ПЛК не выполняется (STOP?)"
+        prev_hb = heartbeat
+
         print(
-            "%s  D0=%d %-7s  запусков=%d  квитировано=%d  последняя причина=%d"
-            % (time.strftime("%H:%M:%S"), regs[0], state, regs[1], regs[4], regs[5])
+            "%s  D0=%d %-7s  запусков=%d  квитировано=%d  причина=%d  %s"
+            % (time.strftime("%H:%M:%S"), regs[0], state, regs[1], regs[4], regs[5], plc_state)
         )
 
         printed += 1

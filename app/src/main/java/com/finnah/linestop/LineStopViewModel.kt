@@ -192,30 +192,34 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         if (ackAttempts >= MAX_ACK_ATTEMPTS) return
         lastAckAttemptAt = now
         ackAttempts++
-        writeAck(pending.causeCode ?: 0, pending.id)
+        writeAck(pending.causeCode ?: 0, pending.id, logIt = false)
     }
 
-    private fun writeAck(causeCode: Int, alarmId: Long?) {
+    private fun writeAck(causeCode: Int, alarmId: Long?, logIt: Boolean) {
         try {
             client.writeSingleRegister(PlcRegisters.d(PlcRegisters.CAUSE_CODE), causeCode)
             client.writeSingleRegister(PlcRegisters.d(PlcRegisters.ACK_REQUEST), 1)
-            writeLog(
-                LogEntry.LEVEL_INFO, LogEntry.CAT_ACK,
-                "Квитирование отправлено в ПЛК (код $causeCode)", alarmId
-            )
+            if (logIt) {
+                writeLog(
+                    LogEntry.LEVEL_INFO, LogEntry.CAT_ACK,
+                    "Квитирование отправлено в ПЛК (код $causeCode)", alarmId
+                )
+            }
         } catch (t: Throwable) {
-            writeLog(
-                LogEntry.LEVEL_ERROR, LogEntry.CAT_ACK,
-                "Не удалось отправить квитирование: ${t.message}", alarmId
-            )
+            if (logIt) {
+                writeLog(
+                    LogEntry.LEVEL_ERROR, LogEntry.CAT_ACK,
+                    "Не удалось отправить квитирование: ${t.message}", alarmId
+                )
+            }
         }
     }
 
     // ---------------------------------------------------------------- alarms
 
-    fun acknowledge(alarmId: Long, causeCode: Int, causeText: String?) {
+    fun acknowledge(alarmId: Long, causeCode: Int, causePath: String?, causeText: String?) {
         val before = _alarms.value
-        val after = AlarmEngine.acknowledge(before, alarmId, causeCode, causeText)
+        val after = AlarmEngine.acknowledge(before, alarmId, causeCode, causePath, causeText)
         if (after === before) return
         persistAlarms(before, after)
         _alarms.value = after
@@ -230,7 +234,7 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
 
         lastAckAttemptAt = System.currentTimeMillis()
         ackAttempts = 1
-        viewModelScope.launch(Dispatchers.IO) { writeAck(causeCode, alarmId) }
+        viewModelScope.launch(Dispatchers.IO) { writeAck(causeCode, alarmId, logIt = true) }
     }
 
     fun dismissDialog() {

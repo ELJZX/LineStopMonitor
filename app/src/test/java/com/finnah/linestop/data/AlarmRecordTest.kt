@@ -39,22 +39,32 @@ class AlarmRecordTest {
     }
 
     @Test
-    fun `название причины для известного кода`() {
-        assertEquals("1. Причина остановки №1", AlarmRecord(id = 1, stopTime = 0L, causeCode = 1).causeLabel)
+    fun `название причины из справочника`() {
+        val alarm = AlarmRecord(id = 1, stopTime = 0L, causeCode = 11)
+        assertEquals("1.1 Мойка", alarm.causeLabel)
+    }
+
+    @Test
+    fun `полный путь причины имеет приоритет`() {
+        val alarm = AlarmRecord(
+            id = 1, stopTime = 0L, causeCode = 11,
+            causePath = "Технологическое оборудование / 1. Нет продукта / 1.1 Мойка"
+        )
+        assertEquals(
+            "Технологическое оборудование / 1. Нет продукта / 1.1 Мойка",
+            alarm.causeLabel
+        )
     }
 
     @Test
     fun `другая причина с текстом`() {
-        val alarm = AlarmRecord(
-            id = 1, stopTime = 0L,
-            causeCode = StopCauses.OTHER_CODE, causeText = "Порвался ремень"
-        )
+        val alarm = AlarmRecord(id = 1, stopTime = 0L, causeCode = 19, causeText = "Порвался ремень")
         assertEquals("Порвался ремень", alarm.causeLabel)
     }
 
     @Test
     fun `другая причина без текста`() {
-        val alarm = AlarmRecord(id = 1, stopTime = 0L, causeCode = StopCauses.OTHER_CODE)
+        val alarm = AlarmRecord(id = 1, stopTime = 0L, causeCode = 19)
         assertEquals("Другая причина", alarm.causeLabel)
     }
 

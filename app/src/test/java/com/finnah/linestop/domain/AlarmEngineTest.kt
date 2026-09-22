@@ -210,26 +210,34 @@ class AlarmEngineTest {
     @Test
     fun `выбор причины закрывает случай сразу`() {
         val list = listOf(AlarmRecord(id = 1L, stopTime = 1_000L))
-        val after = AlarmEngine.acknowledge(list, 1L, 5, "  Порвался ремень  ")
+        val path = "Технологическое оборудование / 1. Нет продукта / 1.1 Мойка"
+        val after = AlarmEngine.acknowledge(list, 1L, 11, path, null)
         val alarm = after[0]
         assertTrue(alarm.closed)
         assertTrue(alarm.ackPending)
-        assertEquals(5, alarm.causeCode)
-        assertEquals("Порвался ремень", alarm.causeText)
+        assertEquals(11, alarm.causeCode)
+        assertEquals(path, alarm.causePath)
         assertTrue(alarm.dialogShown)
+    }
+
+    @Test
+    fun `текст другой причины сохраняется без лишних пробелов`() {
+        val list = listOf(AlarmRecord(id = 1L, stopTime = 1_000L))
+        val after = AlarmEngine.acknowledge(list, 1L, 19, "… / Другая причина", "  Порвался ремень  ")
+        assertEquals("Порвался ремень", after[0].causeText)
     }
 
     @Test
     fun `пустой текст причины сохраняется как null`() {
         val list = listOf(AlarmRecord(id = 1L, stopTime = 1_000L))
-        val after = AlarmEngine.acknowledge(list, 1L, 1, "   ")
+        val after = AlarmEngine.acknowledge(list, 1L, 11, "path", "   ")
         assertNull(after[0].causeText)
     }
 
     @Test
     fun `выбор причины для неизвестного id ничего не меняет`() {
         val list = listOf(AlarmRecord(id = 1L, stopTime = 1_000L))
-        assertSame(list, AlarmEngine.acknowledge(list, 99L, 1, null))
+        assertSame(list, AlarmEngine.acknowledge(list, 99L, 11, null, null))
     }
 
     @Test

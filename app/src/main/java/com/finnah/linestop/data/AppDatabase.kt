@@ -9,7 +9,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, NAME, null, VERS
 
     companion object {
         const val NAME = "linestop.db"
-        const val VERSION = 1
+        const val VERSION = 2
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -33,6 +33,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, NAME, null, VERS
                 duration_ms INTEGER,
                 cause_code INTEGER,
                 cause_text TEXT,
+                cause_path TEXT,
                 closed INTEGER NOT NULL DEFAULT 0,
                 dialog_shown INTEGER NOT NULL DEFAULT 0,
                 ack_pending INTEGER NOT NULL DEFAULT 0,
@@ -58,6 +59,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, NAME, null, VERS
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Схема версии 1 — миграции не требуются.
+        if (oldVersion < 2) {
+            // добавлен полный путь причины «Категория / Пункт / Причина»
+            db.execSQL("ALTER TABLE alarms ADD COLUMN cause_path TEXT")
+        }
     }
 }

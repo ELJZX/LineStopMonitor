@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -106,23 +107,26 @@ fun MainScreen(vm: LineStopViewModel) {
             }
         }
     ) { padding ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            StatusCard(snapshot, openAlarms.size)
-            Spacer(Modifier.height(16.dp))
+            item {
+                StatusCard(snapshot, openAlarms.size)
+            }
 
             if (openAlarms.isNotEmpty()) {
-                Text(
-                    "Активные аварии",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(Modifier.height(8.dp))
-                openAlarms.forEach { alarm ->
+                item {
+                    Text(
+                        "Активные аварии",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                items(openAlarms, key = { "active-${it.id}" }) { alarm ->
                     ActiveAlarmCard(
                         alarm = alarm,
                         liveDurationMs = if (alarm.ongoing) {
@@ -130,26 +134,27 @@ fun MainScreen(vm: LineStopViewModel) {
                         } else null,
                         onSetCause = { vm.showCauseDialog(alarm.id) }
                     )
-                    Spacer(Modifier.height(8.dp))
                 }
-                Spacer(Modifier.height(8.dp))
             }
 
-            Text(
-                "История (${history.size})",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(Modifier.height(8.dp))
+            item {
+                Text(
+                    "История (${history.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
 
             if (history.isEmpty()) {
-                Text(
-                    "Нет закрытых случаев",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                item {
+                    Text(
+                        "Нет закрытых случаев",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             } else {
-                LazyColumn(modifier = Modifier.weight(1f)) {
-                    items(history, key = { it.id }) { alarm ->
+                items(history, key = { "history-${it.id}" }) { alarm ->
+                    Column {
                         HistoryRow(alarm)
                         HorizontalDivider()
                     }
@@ -161,7 +166,8 @@ fun MainScreen(vm: LineStopViewModel) {
     dialogAlarm?.let { alarm ->
         CauseDialog(
             alarm = alarm,
-            onConfirm = { code, text -> vm.acknowledge(alarm.id, code, text) },
+            onConfirm = { code, path, text -> vm.acknowledge(alarm.id, code, path, text) },
+            onEndShift = { showEndShift = true },
             onDismiss = { vm.dismissDialog() }
         )
     }

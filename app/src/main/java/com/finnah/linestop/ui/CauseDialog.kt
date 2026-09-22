@@ -32,9 +32,11 @@ import com.finnah.linestop.util.formatDuration
 import com.finnah.linestop.util.formatTime
 
 /**
- * Выбор причины остановки в два шага:
- *  1) пункт внутри категории («Нет продукта», «Формовка + протяжка», ...);
- *  2) конкретная причина пункта («1.1 Мойка», ...) либо «Другая причина» с ручным вводом.
+ * Выбор причины остановки в три шага:
+ *  1) категория — «Технологическое оборудование», «Автомат фасовки»,
+ *     «Конечное оборудование», «Честный знак»;
+ *  2) пункт внутри категории;
+ *  3) конкретная причина пункта либо «Другая причина» с ручным вводом.
  *
  * Окно компактное (не на весь экран), справа внизу — кнопка «Закончить работу».
  */
@@ -53,10 +55,12 @@ fun CauseDialog(
     val isOther = reason?.other == true
     val canConfirm = reason != null && (!isOther || otherText.isNotBlank())
 
-    fun reset() {
-        category = null
-        item = null
-        reason = null
+    fun goBack() {
+        when {
+            reason != null -> reason = null
+            item != null -> item = null
+            category != null -> category = null
+        }
         otherText = ""
     }
 
@@ -69,11 +73,15 @@ fun CauseDialog(
         )
     }
 
+    val title = when {
+        category == null -> "Категория причины"
+        item == null -> category!!.title
+        else -> "Уточните причину"
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text(if (item == null) "Укажите причину остановки" else "Уточните причину")
-        },
+        title = { Text(title) },
         text = {
             Column(
                 modifier = Modifier
@@ -98,82 +106,84 @@ fun CauseDialog(
                 )
                 Spacer(Modifier.height(12.dp))
 
-                val currentItem = item
-                if (currentItem == null) {
-                    CauseCatalog.categories.forEach { cat ->
-                        Text(
-                            cat.title,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF1B5E20)
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Row(Modifier.fillMaxWidth()) {
-                            cat.items.forEach { it2 ->
-                                OutlinedButton(
-                                    onClick = {
-                                        category = cat
-                                        item = it2
-                                        reason = null
-                                        otherText = ""
-                                    },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(2.dp)
-                                ) {
-                                    Text(it2.title, style = MaterialTheme.typography.labelMedium)
-                                }
+                when {
+                    // Шаг 1 — категория
+                    category == null -> {
+                        CauseCatalog.categories.forEach { cat ->
+                            OutlinedButton(
+                                onClick = { category = cat },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Text(
+                                    cat.title,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
-                        Spacer(Modifier.height(12.dp))
                     }
-                } else {
-                    Text(
-                        "${category?.title ?: ""} → ${currentItem.title}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF616161)
-                    )
-                    Spacer(Modifier.height(8.dp))
 
-                    currentItem.reasons.forEach { r ->
-                        val selected = reason == r
-                        OutlinedButton(
-                            onClick = { reason = r },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 3.dp),
-                            colors = if (selected) {
-                                ButtonDefaults.outlinedButtonColors(
-                                    containerColor = Color(0xFFE8F5E9)
-                                )
-                            } else {
-                                ButtonDefaults.outlinedButtonColors()
+                    // Шаг 2 — пункт внутри категории
+                    item == null -> {
+                        category!!.items.forEach { it2 ->
+                            OutlinedButton(
+                                onClick = { item = it2 },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Text(it2.title, modifier = Modifier.fillMaxWidth())
                             }
-                        ) {
-                            Text(
-                                r.title,
+                        }
+                    }
+
+                    // Шаг 3 — причина
+                    else -> {
+                        item!!.reasons.forEach { r ->
+                            val selected = reason == r
+                            OutlinedButton(
+                                onClick = { reason = r },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                colors = if (selected) {
+                                    ButtonDefaults.outlinedButtonColors(
+                                        containerColor = Color(0xFFE8F5E9)
+                                    )
+                                } else {
+                                    ButtonDefaults.outlinedButtonColors()
+                                }
+                            ) {
+                                Text(
+                                    r.title,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+
+                        if (isOther) {
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = otherText,
+                                onValueChange = { otherText = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                label = { Text("Опишите причину вручную") },
+                                minLines = 2
                             )
                         }
-                    }
-
-                    if (isOther) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = otherText,
-                            onValueChange = { otherText = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Опишите причину вручную") },
-                            minLines = 2
-                        )
                     }
                 }
             }
         },
         confirmButton = {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (category != null) {
+                    TextButton(onClick = { goBack() }) { Text("Назад") }
+                }
                 if (item != null) {
-                    TextButton(onClick = { reset() }) { Text("Назад") }
                     TextButton(enabled = canConfirm, onClick = { confirm() }) {
                         Text("Подтвердить")
                     }

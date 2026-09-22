@@ -138,6 +138,27 @@ class AlarmEngineTest {
     }
 
     @Test
+    fun `всплывает только последняя незакрытая авария`() {
+        val first = AlarmRecord(id = 1L, stopTime = 1_000L)
+        val second = AlarmRecord(id = 2L, stopTime = 2_000L)
+        val result = AlarmEngine.poll(
+            alarms = listOf(first, second),
+            prev = snap(true),
+            cur = snap(false, start = 2),
+            firstRead = false,
+            now = 5_000L,
+            nextId = 3L,
+            shiftId = null
+        )
+        // диалог — только по последней аварии
+        assertEquals(2L, result.dialogAlarm?.id)
+        // старая авария остаётся открытой и доступна через интерфейс
+        val older = result.alarms.first { it.id == 1L }
+        assertTrue(older.ongoing)
+        assertFalse(older.closed)
+    }
+
+    @Test
     fun `без изменений возвращается тот же список`() {
         val list = listOf(AlarmRecord(id = 1L, stopTime = 100L))
         val result = AlarmEngine.poll(

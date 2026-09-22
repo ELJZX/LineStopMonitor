@@ -265,12 +265,14 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         writeLog(LogEntry.LEVEL_INFO, LogEntry.CAT_SHIFT, "Смена начата: $name", shiftId = shift.id)
     }
 
-    /** Завершить текущую смену. */
+    /** Завершить текущую смену. Закрывает и окно выбора причины. */
     fun endShift() {
         val shift = _shift.value ?: return
         val now = System.currentTimeMillis()
         shiftDao.end(shift.id, now)
         _shift.value = null
+        // завершаем работу — окно выбора причины больше не показываем
+        _dialogAlarm.value = null
         writeLog(
             LogEntry.LEVEL_INFO, LogEntry.CAT_SHIFT,
             "Смена завершена: ${shift.operator}, длительность ${formatDuration(now - shift.startTime)}",

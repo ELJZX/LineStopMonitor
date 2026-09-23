@@ -11,7 +11,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -27,6 +30,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.finnah.linestop.data.LogEntry
+import com.finnah.linestop.data.MechanicCatalog
 import com.finnah.linestop.util.AccessGuard
 import com.finnah.linestop.util.formatTime
 
@@ -73,20 +77,32 @@ fun AccessDialog(
     )
 }
 
-/** Диалог начала смены: оператор вводит фамилию. */
+/** Диалог начала смены: оператор и ответственный механик. */
 @Composable
 fun OperatorDialog(
-    onConfirm: (String) -> Unit,
+    alert: Boolean = false,
+    onConfirm: (operator: String, mechanic: String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var name by remember { mutableStateOf("") }
+    var mechanic by remember { mutableStateOf("") }
+    var mechanicMenu by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Начать работу") },
+        title = { Text(if (alert) "Требуется начать смену" else "Начать работу") },
         text = {
             Column(Modifier.fillMaxWidth()) {
-                Text("Введите фамилию оператора линии:")
+                if (alert) {
+                    Text(
+                        "Сработал датчик остановки линии, а смена не начата. " +
+                                "Примите смену, чтобы зафиксировать аварию.",
+                        color = Color(0xFFC62828),
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
+                Text("Укажите оператора линии и ответственного механика:")
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = name,
@@ -95,12 +111,43 @@ fun OperatorDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(Modifier.height(12.dp))
+                Column(Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { mechanicMenu = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = mechanic.ifBlank { "Выберите ответственного механика" },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = if (mechanic.isBlank()) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            }
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = mechanicMenu,
+                        onDismissRequest = { mechanicMenu = false }
+                    ) {
+                        MechanicCatalog.mechanics.forEach { person ->
+                            DropdownMenuItem(
+                                text = { Text(person) },
+                                onClick = {
+                                    mechanic = person
+                                    mechanicMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = name.isNotBlank(),
-                onClick = { onConfirm(name) }
+                enabled = name.isNotBlank() && mechanic.isNotBlank(),
+                onClick = { onConfirm(name, mechanic) }
             ) { Text("Начать") }
         },
         dismissButton = {
@@ -113,13 +160,20 @@ fun OperatorDialog(
 @Composable
 fun EndShiftDialog(
     operator: String,
+    mechanic: String,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Завершение работы") },
-        text = { Text("Вы точно хотите завершить работу на линии?\n\nОператор: $operator") },
+        text = {
+            Text(
+                "Вы точно хотите завершить работу на линии?\n\n" +
+                        "Оператор: $operator\n" +
+                        "Механик: ${mechanic.ifBlank { "—" }}"
+            )
+        },
         confirmButton = {
             TextButton(onClick = onConfirm) { Text("Да") }
         },

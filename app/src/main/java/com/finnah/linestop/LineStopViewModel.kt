@@ -12,6 +12,8 @@ import com.finnah.linestop.data.LogEntry
 import com.finnah.linestop.data.ShiftDao
 import com.finnah.linestop.data.ShiftRecord
 import com.finnah.linestop.domain.AlarmEngine
+import com.finnah.linestop.net.EventReporter
+import com.finnah.linestop.net.MonitorEvent
 import com.finnah.linestop.plc.ModbusTcpClient
 import com.finnah.linestop.plc.PlcRegisters
 import com.finnah.linestop.plc.PlcSnapshot
@@ -25,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 /**
  * Ядро приложения.
@@ -39,9 +42,12 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         const val DEFAULT_PORT = 502
         private const val KEY_IP = "plc_ip"
         private const val KEY_PORT = "plc_port"
+        private const val KEY_MONITOR_URL = "monitor_url"
+        private const val KEY_DEVICE_ID = "device_id"
         private const val POLL_MS = 200L
         private const val RETRY_MS = 2000L
         private const val ACK_RETRY_MS = 3000L
+        private const val REPORT_MS = 500L
         private const val MAX_ACK_ATTEMPTS = 10
         private const val LOG_LIMIT = 300
     }
@@ -67,14 +73,30 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
     private val _dialogAlarm = MutableStateFlow<AlarmRecord?>(null)
     val dialogAlarm: StateFlow<AlarmRecord?> = _dialogAlarm.asStateFlow()
 
+    private val _shiftPrompt = MutableStateFlow(false)
+    val shiftPrompt: StateFlow<Boolean> = _shiftPrompt.asStateFlow()
+
+    private var pendingAlarmStart: Long? = null
+    private var pendingAlarmEnd: Long? = null
+
     private val _ip = MutableStateFlow(prefs.getString(KEY_IP, DEFAULT_IP) ?: DEFAULT_IP)
     val ip: StateFlow<String> = _ip.asStateFlow()
 
     private val _port = MutableStateFlow(prefs.getInt(KEY_PORT, DEFAULT_PORT))
     val port: StateFlow<Int> = _port.asStateFlow()
 
+    private val _monitorUrl = MutableStateFlow(prefs.getString(KEY_MONITOR_URL, "") ?: "")
+    val monitorUrl: StateFlow<String> = _monitorUrl.asStateFlow()
+
+    private val deviceId: String =
+        prefs.getString(KEY_DEVICE_ID, null) ?: UUID.randomUUID().toString().also {
+            prefs.edit().putString(KEY_DEVICE_ID, it).apply()
+        }
+    private val reporter = EventReporter(deviceId)
+
     private var client = ModbusTcpClient(_ip.value, _port.value)
     private var pollJob: Job? = null
+    private var reportJob: Job? = null
 
     private var firstRead = true
     private var prevAlarmActive = false
@@ -84,9 +106,45 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
     init {
         _alarms.value = alarmDao.all()
         _shift.value = shiftDao.active()
-        writeLog(LogEntry.LEVEL_INFO, LogEntry.CAT_APP, "Приложение запущено")
+        reporter.setUrl(_monitorUrl.value)
+        writeLog(
+            LogEntry.LEVEL_INFO, LogEntry.CAT_APP, "Приложение запущено",
+            type = "APP_START"
+        )
         refreshLogs()
         startPolling()
+        startReporting()
+    }
+
+    // ------------------------------------------------------- monitoring
+
+    private fun startReporting() {
+        reportJob?.cancel()
+        reportJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    reporter.flush()
+                } catch (_: Throwable) {
+                    // сеть недоступна — события останутся в очереди
+                }
+                delay(REPORT_MS)
+            }
+        }
+    }
+
+    /** Адрес сервера мониторинга (пусто — отправка выключена). */
+    fun updateMonitorUrl(newUrl: String) {
+        val clean = newUrl.trim()
+        prefs.edit().putString(KEY_MONITOR_URL, clean).apply()
+        _monitorUrl.value = clean
+        reporter.setUrl(clean)
+        if (clean.isNotEmpty()) {
+            writeLog(
+                LogEntry.LEVEL_INFO, LogEntry.CAT_APP,
+                "Адрес мониторинга: $clean", type = "MONITOR_URL"
+            )
+            viewModelScope.launch(Dispatchers.IO) { reporter.flush() }
+        }
     }
 
     // ---------------------------------------------------------------- polling
@@ -103,7 +161,8 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
                         firstRead = true
                         writeLog(
                             LogEntry.LEVEL_INFO, LogEntry.CAT_PLC,
-                            "Связь с ПЛК установлена: ${_ip.value}:${_port.value}"
+                            "Связь с ПЛК установлена: ${_ip.value}:${_port.value}",
+                            type = "PLC_CONNECTED"
                         )
                     }
 
@@ -119,6 +178,7 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
 
                     val prev = _snapshot.value
                     _snapshot.value = cur
+                    detectUnshiftedAlarm(prev, cur)
                     processEvents(prev, cur)
                     retryPendingAckIfDue()
 
@@ -134,13 +194,87 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
                     if (wasConnected) {
                         writeLog(
                             LogEntry.LEVEL_WARN, LogEntry.CAT_PLC,
-                            "Связь с ПЛК потеряна: ${t.message ?: t.javaClass.simpleName}"
+                            "Связь с ПЛК потеряна: ${t.message ?: t.javaClass.simpleName}",
+                            type = "PLC_LOST"
                         )
                     }
                     delay(RETRY_MS)
                 }
             }
         }
+    }
+
+    /**
+     * Смена не начата, но датчик сработал — запоминаем фронт и предлагаем
+     * оператору принять смену.
+     */
+    private fun detectUnshiftedAlarm(prev: PlcSnapshot, cur: PlcSnapshot) {
+        if (_shift.value != null || !cur.connected) return
+
+        val started = cur.alarmActive && !prev.alarmActive
+        val alreadyActive = firstRead && cur.alarmActive
+        if (started || alreadyActive) {
+            if (pendingAlarmStart == null) {
+                pendingAlarmStart = System.currentTimeMillis()
+                pendingAlarmEnd = null
+                writeLog(
+                    LogEntry.LEVEL_WARN, LogEntry.CAT_SHIFT,
+                    "Автопредложение принять смену (сработал датчик без смены)",
+                    type = "SHIFT_REQUIRED", stopTime = pendingAlarmStart
+                )
+            }
+            _shiftPrompt.value = true
+        }
+
+        if (cur.alarmActive) {
+            pendingAlarmEnd = null
+        } else if (prev.alarmActive && pendingAlarmStart != null) {
+            pendingAlarmEnd = System.currentTimeMillis()
+        }
+    }
+
+    /** Принятие смены во время уже начавшейся аварии — фиксируем случай. */
+    private fun capturePendingAlarm(shift: ShiftRecord) {
+        val snap = _snapshot.value
+        val pendingStart = pendingAlarmStart
+
+        if (snap.alarmActive) {
+            if (_alarms.value.any { !it.closed }) return
+            val stop = pendingStart ?: System.currentTimeMillis()
+            val id = AlarmEngine.nextId(_alarms.value)
+            val after = AlarmEngine.create(
+                _alarms.value, id, stop, shift.id, snap.startCounter
+            )
+            persistAlarms(_alarms.value, after)
+            _alarms.value = after
+            writeLog(
+                LogEntry.LEVEL_WARN, LogEntry.CAT_ALARM,
+                "АВАРИЯ: сигнал появился в ${formatTime(stop)}",
+                id, shift.id, type = "ALARM_START", stopTime = stop,
+                operator = shift.operator, mechanic = shift.mechanic
+            )
+        } else if (pendingStart != null && pendingAlarmEnd != null) {
+            if (_alarms.value.any { !it.closed }) return
+            val end = pendingAlarmEnd!!
+            val id = AlarmEngine.nextId(_alarms.value)
+            val duration = (end - pendingStart).coerceAtLeast(0L)
+            val after = AlarmEngine.create(
+                _alarms.value, id, pendingStart, shift.id, snap.startCounter,
+                startTime = end, durationMs = duration, dialogShown = true
+            )
+            persistAlarms(_alarms.value, after)
+            _alarms.value = after
+            _dialogAlarm.value = after.lastOrNull()
+            writeLog(
+                LogEntry.LEVEL_INFO, LogEntry.CAT_ALARM,
+                "Авария завершена (линия запущена), длительность ${formatDuration(duration)}",
+                id, shift.id, type = "ALARM_END", durationMs = duration,
+                stopTime = pendingStart, startTime = end,
+                operator = shift.operator, mechanic = shift.mechanic
+            )
+        }
+        pendingAlarmStart = null
+        pendingAlarmEnd = null
     }
 
     private fun processEvents(prev: PlcSnapshot, cur: PlcSnapshot) {
@@ -151,7 +285,8 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
             firstRead = firstRead,
             now = System.currentTimeMillis(),
             nextId = AlarmEngine.nextId(_alarms.value),
-            shiftId = _shift.value?.id
+            shiftId = _shift.value?.id,
+            shiftActive = _shift.value != null
         )
         firstRead = false
 
@@ -165,18 +300,24 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
             is AlarmEngine.Event.Started -> writeLog(
                 LogEntry.LEVEL_WARN, LogEntry.CAT_ALARM,
                 "АВАРИЯ: сигнал появился в ${formatTime(event.alarm.stopTime)}",
-                event.alarm.id, event.alarm.shiftId
+                event.alarm.id, event.alarm.shiftId, type = "ALARM_START",
+                stopTime = event.alarm.stopTime,
+                operator = _shift.value?.operator, mechanic = _shift.value?.mechanic
             )
 
             is AlarmEngine.Event.Ended -> writeLog(
                 LogEntry.LEVEL_INFO, LogEntry.CAT_ALARM,
                 "Авария завершена (линия запущена), длительность ${formatDuration(event.alarm.durationMs)}",
-                event.alarm.id, event.alarm.shiftId
+                event.alarm.id, event.alarm.shiftId, type = "ALARM_END",
+                durationMs = event.alarm.durationMs,
+                stopTime = event.alarm.stopTime, startTime = event.alarm.startTime,
+                operator = _shift.value?.operator, mechanic = _shift.value?.mechanic
             )
 
             is AlarmEngine.Event.AckConfirmed -> writeLog(
                 LogEntry.LEVEL_INFO, LogEntry.CAT_ACK,
-                "ПЛК подтвердил квитирование: ${event.alarms.size} шт."
+                "ПЛК подтвердил квитирование: ${event.alarms.size} шт.",
+                type = "ACK_CONFIRMED"
             )
 
             null -> Unit
@@ -202,14 +343,16 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
             if (logIt) {
                 writeLog(
                     LogEntry.LEVEL_INFO, LogEntry.CAT_ACK,
-                    "Квитирование отправлено в ПЛК (код $causeCode)", alarmId
+                    "Квитирование отправлено в ПЛК (код $causeCode)", alarmId,
+                    type = "ACK_SENT", causeCode = causeCode
                 )
             }
         } catch (t: Throwable) {
             if (logIt) {
                 writeLog(
                     LogEntry.LEVEL_ERROR, LogEntry.CAT_ACK,
-                    "Не удалось отправить квитирование: ${t.message}", alarmId
+                    "Не удалось отправить квитирование: ${t.message}", alarmId,
+                    type = "ACK_ERROR"
                 )
             }
         }
@@ -229,7 +372,11 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         writeLog(
             LogEntry.LEVEL_INFO, LogEntry.CAT_ALARM,
             "Причина выбрана: ${alarm?.causeLabel ?: causeCode} (код $causeCode)",
-            alarmId, alarm?.shiftId
+            alarmId, alarm?.shiftId, type = "CAUSE_SELECTED",
+            causeCode = causeCode, causeText = causeText, causePath = causePath,
+            stopTime = alarm?.stopTime, startTime = alarm?.startTime,
+            durationMs = alarm?.durationMs,
+            operator = _shift.value?.operator, mechanic = _shift.value?.mechanic
         )
 
         lastAckAttemptAt = System.currentTimeMillis()
@@ -245,7 +392,8 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         _alarms.value = after
         writeLog(
             LogEntry.LEVEL_WARN, LogEntry.CAT_ALARM,
-            "Диалог причины закрыт без выбора", alarm.id, alarm.shiftId
+            "Диалог причины закрыт без выбора", alarm.id, alarm.shiftId,
+            type = "CAUSE_DISMISSED"
         )
         _dialogAlarm.value = null
     }
@@ -257,12 +405,32 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------------- shifts
 
     /** Начать смену оператора. */
-    fun startShift(operator: String) {
+    fun startShift(operator: String, mechanic: String) {
         val name = operator.trim()
         if (name.isEmpty()) return
-        val shift = shiftDao.start(name, System.currentTimeMillis())
+        val mech = mechanic.trim()
+        val shift = shiftDao.start(name, mech, System.currentTimeMillis())
         _shift.value = shift
-        writeLog(LogEntry.LEVEL_INFO, LogEntry.CAT_SHIFT, "Смена начата: $name", shiftId = shift.id)
+        _shiftPrompt.value = false
+        writeLog(
+            LogEntry.LEVEL_INFO, LogEntry.CAT_SHIFT,
+            "Смена начата: $name${if (mech.isNotEmpty()) ", механик $mech" else ""}",
+            shiftId = shift.id, type = "SHIFT_START",
+            operator = name, mechanic = mech
+        )
+        capturePendingAlarm(shift)
+    }
+
+    /** Оператор отложил принятие смены. */
+    fun dismissShiftPrompt() {
+        if (_shiftPrompt.value) {
+            writeLog(
+                LogEntry.LEVEL_WARN, LogEntry.CAT_SHIFT,
+                "Оператор отклонил автоматическое предложение принять смену",
+                type = "SHIFT_DECLINED", stopTime = pendingAlarmStart
+            )
+        }
+        _shiftPrompt.value = false
     }
 
     /** Завершить текущую смену. Закрывает и окно выбора причины. */
@@ -273,10 +441,12 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         _shift.value = null
         // завершаем работу — окно выбора причины больше не показываем
         _dialogAlarm.value = null
+        _shiftPrompt.value = false
         writeLog(
             LogEntry.LEVEL_INFO, LogEntry.CAT_SHIFT,
             "Смена завершена: ${shift.operator}, длительность ${formatDuration(now - shift.startTime)}",
-            shiftId = shift.id
+            shiftId = shift.id, type = "SHIFT_END",
+            operator = shift.operator, mechanic = shift.mechanic
         )
     }
 
@@ -305,7 +475,10 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         alarmDao.clear()
         logDao.clear()
         _alarms.value = emptyList()
-        writeLog(LogEntry.LEVEL_WARN, LogEntry.CAT_APP, "История аварий и журнал очищены")
+        writeLog(
+            LogEntry.LEVEL_WARN, LogEntry.CAT_APP, "История аварий и журнал очищены",
+            type = "HISTORY_CLEARED"
+        )
     }
 
     // ---------------------------------------------------------------- helpers
@@ -326,16 +499,46 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
         category: String,
         message: String,
         alarmId: Long? = null,
-        shiftId: Long? = null
+        shiftId: Long? = null,
+        type: String? = null,
+        causeCode: Int? = null,
+        causeText: String? = null,
+        causePath: String? = null,
+        durationMs: Long? = null,
+        stopTime: Long? = null,
+        startTime: Long? = null,
+        operator: String? = null,
+        mechanic: String? = null
     ) {
+        val time = System.currentTimeMillis()
         logDao.add(
             LogEntry(
-                time = System.currentTimeMillis(),
+                time = time,
                 level = level,
                 category = category,
                 message = message,
                 alarmId = alarmId,
                 shiftId = shiftId
+            )
+        )
+        reporter.enqueue(
+            MonitorEvent(
+                time = time,
+                type = type ?: category,
+                level = level,
+                category = category,
+                message = message,
+                deviceId = deviceId,
+                alarmId = alarmId,
+                shiftId = shiftId,
+                stopTime = stopTime,
+                startTime = startTime,
+                causeCode = causeCode,
+                causeText = causeText,
+                causePath = causePath,
+                durationMs = durationMs,
+                operator = operator,
+                mechanic = mechanic
             )
         )
     }
@@ -347,7 +550,11 @@ class LineStopViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         pollJob?.cancel()
+        reportJob?.cancel()
         client.close()
-        writeLog(LogEntry.LEVEL_INFO, LogEntry.CAT_APP, "Приложение закрыто")
+        writeLog(
+            LogEntry.LEVEL_INFO, LogEntry.CAT_APP, "Приложение закрыто",
+            type = "APP_STOP"
+        )
     }
 }

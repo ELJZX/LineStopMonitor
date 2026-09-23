@@ -226,6 +226,62 @@ class AlarmEngineTest {
         assertEquals(7, result.alarms[0].causeCode)
     }
 
+    // ------------------------------------------------------- shift gate
+
+    @Test
+    fun `до начала смены фронт сигнала не создаёт случай`() {
+        val list = emptyList<AlarmRecord>()
+        val result = AlarmEngine.poll(
+            alarms = list,
+            prev = snap(false),
+            cur = snap(true, start = 3),
+            firstRead = false,
+            now = 2_000L,
+            nextId = 1L,
+            shiftId = null,
+            shiftActive = false
+        )
+        assertSame(list, result.alarms)
+        assertNull(result.event)
+        assertNull(result.dialogAlarm)
+    }
+
+    @Test
+    fun `до начала смены спад сигнала не показывает диалог`() {
+        val open = AlarmRecord(id = 1L, stopTime = 1_000L)
+        val list = listOf(open)
+        val result = AlarmEngine.poll(
+            alarms = list,
+            prev = snap(true),
+            cur = snap(false, start = 1),
+            firstRead = false,
+            now = 6_000L,
+            nextId = 2L,
+            shiftId = null,
+            shiftActive = false
+        )
+        assertSame(list, result.alarms)
+        assertNull(result.dialogAlarm)
+        assertNull(result.event)
+    }
+
+    @Test
+    fun `до начала смены идущая авария не восстанавливается`() {
+        val list = emptyList<AlarmRecord>()
+        val result = AlarmEngine.poll(
+            alarms = list,
+            prev = snap(false),
+            cur = snap(true, start = 5),
+            firstRead = true,
+            now = 1_000L,
+            nextId = 7L,
+            shiftId = null,
+            shiftActive = false
+        )
+        assertSame(list, result.alarms)
+        assertNull(result.event)
+    }
+
     // ------------------------------------------------------- acknowledge
 
     @Test
@@ -262,6 +318,26 @@ class AlarmEngineTest {
     }
 
     @Test
+    fun `причина у идущей аварии фиксирует конец и длительность`() {
+        val list = listOf(AlarmRecord(id = 1L, stopTime = 1_000L))
+        val after = AlarmEngine.acknowledge(list, 1L, 5, "path", null, now = 9_000L)
+        val alarm = after[0]
+        assertTrue(alarm.closed)
+        assertEquals(9_000L, alarm.startTime)
+        assertEquals(8_000L, alarm.durationMs)
+    }
+
+    @Test
+    fun `причина у завершённой аварии не меняет времена`() {
+        val list = listOf(
+            AlarmRecord(id = 1L, stopTime = 1_000L, startTime = 6_000L, durationMs = 5_000L)
+        )
+        val after = AlarmEngine.acknowledge(list, 1L, 5, "path", null, now = 9_000L)
+        assertEquals(6_000L, after[0].startTime)
+        assertEquals(5_000L, after[0].durationMs)
+    }
+
+    @Test
     fun `закрытие диалога помечает случай`() {
         val list = listOf(AlarmRecord(id = 1L, stopTime = 1_000L))
         val after = AlarmEngine.dismiss(list, 1L)
@@ -282,5 +358,33 @@ class AlarmEngineTest {
             AlarmRecord(id = 1L, stopTime = 0L),
             AlarmRecord(id = 3L, stopTime = 0L)
         )))
+    }
+
+    // ------------------------------------------------------------- create
+
+    @Test
+    fun `create восстанавливает идущую аварию при приёме смены`() {
+        val after = AlarmEngine.create(emptyList(), nextId = 5L, stopTime = 1_000L,
+            shiftId = 7L, startCounter = 3)
+        assertEquals(1, after.size)
+        val alarm = after[0]
+        assertEquals(5L, alarm.id)
+        assertEquals(1_000L, alarm.stopTime)
+        assertEquals(7L, alarm.shiftId)
+        assertEquals(3, alarm.startCounter)
+        assertTrue(alarm.ongoing)
+        assertFalse(alarm.closed)
+    }
+
+    @Test
+    fun `create создаёт завершённую аварию с диалогом`() {
+        val after = AlarmEngine.create(
+            emptyList(), nextId = 1L, stopTime = 1_000L, shiftId = 2L,
+            startTime = 4_000L, durationMs = 3_000L, dialogShown = true
+        )
+        val alarm = after[0]
+        assertFalse(alarm.ongoing)
+        assertTrue(alarm.dialogShown)
+        assertEquals(3_000L, alarm.durationMs)
     }
 }

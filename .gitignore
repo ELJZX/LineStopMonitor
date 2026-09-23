@@ -24,6 +24,12 @@ __pycache__/
 .venv/
 venv/
 
+# SQLite (веб-мониторинг)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # OS
 Thumbs.db
 .DS_Store

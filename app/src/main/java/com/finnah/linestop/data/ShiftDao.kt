@@ -7,17 +7,20 @@ import android.database.Cursor
 class ShiftDao(private val db: AppDatabase) {
 
     /** Начать новую смену. Предыдущая активная смена закрывается. */
-    fun start(operator: String, time: Long): ShiftRecord {
+    fun start(operator: String, mechanic: String, time: Long): ShiftRecord {
         val active = active()
         if (active != null) end(active.id, time)
 
         val values = ContentValues().apply {
             put("operator", operator)
+            put("mechanic", mechanic.trim().takeIf { it.isNotEmpty() })
             put("start_time", time)
             putNull("end_time")
         }
         val id = db.writableDatabase.insert("shifts", null, values)
-        return ShiftRecord(id = id, operator = operator, startTime = time)
+        return ShiftRecord(
+            id = id, operator = operator, mechanic = mechanic.trim(), startTime = time
+        )
     }
 
     fun end(id: Long, time: Long) {
@@ -45,6 +48,7 @@ class ShiftDao(private val db: AppDatabase) {
     private fun fromCursor(c: Cursor) = ShiftRecord(
         id = c.getLong(c.getColumnIndexOrThrow("id")),
         operator = c.getString(c.getColumnIndexOrThrow("operator")),
+        mechanic = c.getStringOrNull("mechanic") ?: "",
         startTime = c.getLong(c.getColumnIndexOrThrow("start_time")),
         endTime = c.getLongOrNull("end_time")
     )

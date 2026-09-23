@@ -4,6 +4,7 @@ package com.finnah.linestop.data
 data class ShiftRecord(
     val id: Long = 0L,
     val operator: String,
+    val mechanic: String = "",
     val startTime: Long,
     val endTime: Long? = null
 ) {

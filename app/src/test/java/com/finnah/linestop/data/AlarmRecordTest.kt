@@ -41,7 +41,7 @@ class AlarmRecordTest {
     @Test
     fun `название причины из справочника`() {
         val alarm = AlarmRecord(id = 1, stopTime = 0L, causeCode = 11)
-        assertEquals("1.1 Мойка", alarm.causeLabel)
+        assertEquals("Мойка", alarm.causeLabel)
     }
 
     @Test

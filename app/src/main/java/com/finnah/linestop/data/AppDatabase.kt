@@ -9,7 +9,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, NAME, null, VERS
 
     companion object {
         const val NAME = "linestop.db"
-        const val VERSION = 2
+        const val VERSION = 3
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -18,6 +18,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, NAME, null, VERS
             CREATE TABLE shifts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 operator TEXT NOT NULL,
+                mechanic TEXT,
                 start_time INTEGER NOT NULL,
                 end_time INTEGER
             )
@@ -62,6 +63,10 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, NAME, null, VERS
         if (oldVersion < 2) {
             // добавлен полный путь причины «Категория / Пункт / Причина»
             db.execSQL("ALTER TABLE alarms ADD COLUMN cause_path TEXT")
+        }
+        if (oldVersion < 3) {
+            // добавлен ответственный механик смены
+            db.execSQL("ALTER TABLE shifts ADD COLUMN mechanic TEXT")
         }
     }
 }

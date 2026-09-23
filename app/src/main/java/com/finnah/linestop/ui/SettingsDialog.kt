@@ -22,19 +22,21 @@ import androidx.compose.ui.unit.dp
 fun SettingsDialog(
     currentIp: String,
     currentPort: Int,
-    onSave: (ip: String, port: Int) -> Unit,
+    currentMonitorUrl: String,
+    onSave: (ip: String, port: Int, monitorUrl: String) -> Unit,
     onClearHistory: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var ipText by remember { mutableStateOf(currentIp) }
     var portText by remember { mutableStateOf(currentPort.toString()) }
+    var monitorText by remember { mutableStateOf(currentMonitorUrl) }
 
     val portValue = portText.toIntOrNull()
     val portValid = portValue != null && portValue in 1..65535
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Настройки связи") },
+        title = { Text("Настройки") },
         text = {
             Column(Modifier.fillMaxWidth()) {
                 OutlinedTextField(
@@ -55,13 +57,26 @@ fun SettingsDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(12.dp))
-                Text("ПЛК DVP12SE11R: порт 502, Unit ID 1. Эмулятор на ПК — порт 502 (или свой).")
+                OutlinedTextField(
+                    value = monitorText,
+                    onValueChange = { monitorText = it },
+                    label = { Text("Адрес сервера мониторинга") },
+                    placeholder = { Text("http://172.16.29.1:8080") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "ПЛК DVP12SE11R: порт 502. Сервер мониторинга — адрес ПК " +
+                            "с web/server.py (пусто — отправка выключена)."
+                )
             }
         },
         confirmButton = {
             TextButton(
                 enabled = ipText.isNotBlank() && portValid,
-                onClick = { onSave(ipText.trim(), portValue ?: 502) }
+                onClick = { onSave(ipText.trim(), portValue ?: 502, monitorText.trim()) }
             ) { Text("Сохранить") }
         },
         dismissButton = {

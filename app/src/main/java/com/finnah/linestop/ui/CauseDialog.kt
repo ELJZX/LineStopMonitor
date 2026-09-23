@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.finnah.linestop.data.AlarmRecord
 import com.finnah.linestop.data.CauseCatalog
 import com.finnah.linestop.util.formatDuration
@@ -86,7 +87,7 @@ fun CauseDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 460.dp)
+                    .heightIn(max = 560.dp)
                     .verticalScroll(rememberScrollState())
             ) {
                 Text(
@@ -115,11 +116,13 @@ fun CauseDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 4.dp)
+                                    .height(80.dp)
                             ) {
                                 Text(
                                     cat.title,
                                     modifier = Modifier.fillMaxWidth(),
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp
                                 )
                             }
                         }
@@ -133,8 +136,13 @@ fun CauseDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 4.dp)
+                                    .height(80.dp)
                             ) {
-                                Text(it2.title, modifier = Modifier.fillMaxWidth())
+                                Text(
+                                    it2.title,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    fontSize = 18.sp
+                                )
                             }
                         }
                     }
@@ -147,7 +155,8 @@ fun CauseDialog(
                                 onClick = { reason = r },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 3.dp),
+                                    .padding(vertical = 3.dp)
+                                    .height(80.dp),
                                 colors = if (selected) {
                                     ButtonDefaults.outlinedButtonColors(
                                         containerColor = Color(0xFFE8F5E9)
@@ -159,7 +168,8 @@ fun CauseDialog(
                                 Text(
                                     r.title,
                                     modifier = Modifier.fillMaxWidth(),
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = 18.sp
                                 )
                             }
                         }

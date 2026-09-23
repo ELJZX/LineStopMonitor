@@ -24,4 +24,13 @@ class ShiftRecordTest {
         val shift = ShiftRecord(id = 1, operator = "Иванов", startTime = 1_000L)
         assertEquals(4_000L, shift.duration(now = 5_000L))
     }
+
+    @Test
+    fun `по умолчанию механик пустой`() {
+        assertEquals("", ShiftRecord(id = 1, operator = "Иванов", startTime = 0L).mechanic)
+        assertEquals(
+            "Петров",
+            ShiftRecord(id = 1, operator = "Иванов", mechanic = "Петров", startTime = 0L).mechanic
+        )
+    }
 }

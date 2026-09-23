@@ -12,6 +12,8 @@ import com.finnah.linestop.plc.PlcSnapshot
  *  - D0 1->0  -> случай закрывается по времени, показывается диалог причины
  *  - D4 вырос -> отправленные квитирования подтверждены ПЛК
  *  - при первом чтении, если авария уже идёт, случай восстанавливается
+ *  - пока смена не начата ([shiftActive] == false), аварии не фиксируются
+ *    и диалог причины не показывается
  */
 object AlarmEngine {
 
@@ -34,11 +36,17 @@ object AlarmEngine {
         firstRead: Boolean,
         now: Long,
         nextId: Long,
-        shiftId: Long?
+        shiftId: Long?,
+        shiftActive: Boolean = true
     ): Result {
         var list = alarms
         var dialog: AlarmRecord? = null
         var event: Event? = null
+
+        // До начала смены аварии не фиксируются и причина не запрашивается.
+        if (!shiftActive) {
+            return Result(list, null, null)
+        }
 
         if (firstRead) {
             if (cur.alarmActive && list.none { !it.closed }) {
@@ -96,18 +104,24 @@ object AlarmEngine {
         alarmId: Long,
         causeCode: Int,
         causePath: String?,
-        causeText: String?
+        causeText: String?,
+        now: Long = System.currentTimeMillis()
     ): List<AlarmRecord> {
         if (alarms.none { it.id == alarmId }) return alarms
         return alarms.map {
             if (it.id == alarmId) {
+                // Если причину указали у ещё идущей аварии — фиксируем конец и длительность,
+                // чтобы у каждого случая были начало, конец и продолжительность.
+                val end = it.startTime ?: now
                 it.copy(
                     causeCode = causeCode,
                     causePath = causePath,
                     causeText = causeText?.trim()?.takeIf { t -> t.isNotEmpty() },
                     closed = true,
                     ackPending = true,
-                    dialogShown = true
+                    dialogShown = true,
+                    startTime = end,
+                    durationMs = it.durationMs ?: (end - it.stopTime).coerceAtLeast(0L)
                 )
             } else {
                 it
@@ -120,6 +134,29 @@ object AlarmEngine {
         if (alarms.none { it.id == alarmId }) return alarms
         return alarms.map { if (it.id == alarmId) it.copy(dialogShown = true) else it }
     }
+
+    /**
+     * Создаёт случай аварии вне обычного детектора фронта — например, когда
+     * оператор принимает смену уже во время остановки линии.
+     */
+    fun create(
+        alarms: List<AlarmRecord>,
+        nextId: Long,
+        stopTime: Long,
+        shiftId: Long?,
+        startCounter: Int = 0,
+        startTime: Long? = null,
+        durationMs: Long? = null,
+        dialogShown: Boolean = false
+    ): List<AlarmRecord> = alarms + AlarmRecord(
+        id = nextId,
+        shiftId = shiftId,
+        stopTime = stopTime,
+        startTime = startTime,
+        durationMs = durationMs,
+        dialogShown = dialogShown,
+        startCounter = startCounter
+    )
 
     fun nextId(alarms: List<AlarmRecord>): Long = (alarms.maxOfOrNull { it.id } ?: 0L) + 1L
 

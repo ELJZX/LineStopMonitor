@@ -88,7 +88,7 @@ class ModbusTcpClient:
 class Alarm:
     _next_id = 1
 
-    def __init__(self, stop_time, start_counter=0):
+    def __init__(self, stop_time, start_counter=0, shift_id=None):
         self.id = Alarm._next_id
         Alarm._next_id += 1
         self.stop_time = stop_time
@@ -96,6 +96,8 @@ class Alarm:
         self.duration_ms = None
         self.cause_code = None
         self.cause_text = None
+        self.cause_path = None
+        self.shift_id = shift_id
         self.closed = False
         self.dialog_shown = False
         self.ack_pending = False
@@ -116,9 +118,14 @@ class Alarm:
 
 
 class AppLogic:
-    """Порт LineStopViewModel.kt."""
+    """Порт LineStopViewModel.kt.
 
-    def __init__(self, client, now=None):
+    Если задан `on_event`, каждый значимый переход порождает событие
+    (словарь в формате MonitorEvent Android-приложения) — используется для
+    интеграционных тестов со сервером веб-мониторинга.
+    """
+
+    def __init__(self, client, now=None, on_event=None, device_id="simulator"):
         self.client = client
         self.alarms = []
         self.dialog = None
@@ -126,6 +133,32 @@ class AppLogic:
         self.first_read = True
         self.prev_alarm_active = False
         self._now = now or (lambda: int(time.time() * 1000))
+        self.on_event = on_event
+        self.device_id = device_id
+        self.shift = None
+        self._shift_seq = 0
+
+    # ---- events ---------------------------------------------------------
+    def _emit(self, event_type, level, category, message, alarm=None, **extra):
+        if self.on_event is None:
+            return
+        event = {
+            "time": self._now(),
+            "type": event_type,
+            "level": level,
+            "category": category,
+            "message": message,
+            "deviceId": self.device_id,
+        }
+        if alarm is not None:
+            event["alarmId"] = alarm.id
+            if alarm.shift_id is not None:
+                event["shiftId"] = alarm.shift_id
+        if self.shift:
+            event.setdefault("operator", self.shift.get("operator"))
+            event.setdefault("mechanic", self.shift.get("mechanic"))
+        event.update(extra)
+        self.on_event(event)
 
     # ---- helpers --------------------------------------------------------
     def open_alarm(self):
@@ -134,9 +167,16 @@ class AppLogic:
                 return a
         return None
 
+    def _current_shift_id(self):
+        return self.shift["id"] if self.shift else None
+
     def _add_alarm(self, stop_time, start_counter):
-        alarm = Alarm(stop_time, start_counter)
+        alarm = Alarm(stop_time, start_counter, shift_id=self._current_shift_id())
         self.alarms.append(alarm)
+        self._emit(
+            "ALARM_START", "WARN", "ALARM",
+            "АВАРИЯ: сигнал появился", alarm=alarm
+        )
         return alarm
 
     def _finalize_open_alarm(self, now):
@@ -147,6 +187,11 @@ class AppLogic:
         open_alarm.duration_ms = max(0, now - open_alarm.stop_time)
         open_alarm.dialog_shown = True
         self.dialog = open_alarm
+        self._emit(
+            "ALARM_END", "INFO", "ALARM",
+            "Авария завершена, длительность %d мс" % open_alarm.duration_ms,
+            alarm=open_alarm, durationMs=open_alarm.duration_ms
+        )
 
     # ---- polling --------------------------------------------------------
     def poll(self):
@@ -188,24 +233,64 @@ class AppLogic:
                 p.ack_pending = False
                 if p.cause_code is None and cur["last_cause"] > 0:
                     p.cause_code = cur["last_cause"]
+            if pending:
+                self._emit(
+                    "ACK_CONFIRMED", "INFO", "ACK",
+                    "ПЛК подтвердил квитирование: %d шт." % len(pending)
+                )
 
         self.prev_alarm_active = cur["alarm_active"]
+
+    # ---- shifts ---------------------------------------------------------
+    def start_shift(self, operator, mechanic=None):
+        self._shift_seq += 1
+        self.shift = {"id": self._shift_seq, "operator": operator,
+                      "mechanic": mechanic or "", "start": self._now(), "end": None}
+        self._emit(
+            "SHIFT_START", "INFO", "SHIFT",
+            "Смена начата: %s" % operator,
+            operator=operator, mechanic=mechanic or "", shiftId=self.shift["id"]
+        )
+
+    def end_shift(self):
+        if not self.shift:
+            return
+        shift = self.shift
+        shift["end"] = self._now()
+        self.dialog = None
+        self.shift = None
+        self._emit(
+            "SHIFT_END", "INFO", "SHIFT",
+            "Смена завершена: %s" % shift["operator"],
+            operator=shift["operator"], mechanic=shift.get("mechanic", ""),
+            shiftId=shift["id"]
+        )
 
     # ---- actions --------------------------------------------------------
     def dismiss_dialog(self):
         if self.dialog is not None:
             self.dialog.dialog_shown = True
+            self._emit(
+                "CAUSE_DISMISSED", "WARN", "ALARM",
+                "Диалог причины закрыт без выбора", alarm=self.dialog
+            )
         self.dialog = None
 
-    def acknowledge(self, alarm_id, cause_code, cause_text=None):
+    def acknowledge(self, alarm_id, cause_code, cause_text=None, cause_path=None):
         alarm = next((a for a in self.alarms if a.id == alarm_id), None)
         if alarm is None:
             return
         alarm.cause_code = cause_code
         alarm.cause_text = cause_text
+        alarm.cause_path = cause_path
         alarm.closed = True        # закрываем сразу, не ждём ответа ПЛК
         alarm.ack_pending = True   # квитирование ещё уходит в ПЛК (D100/D101)
         alarm.dialog_shown = True
         self.dialog = None
+        self._emit(
+            "CAUSE_SELECTED", "INFO", "ALARM",
+            "Причина выбрана: код %s" % cause_code, alarm=alarm,
+            causeCode=cause_code, causeText=cause_text, causePath=cause_path
+        )
         self.client.write_single_register(MODBUS_D_BASE + 100, cause_code)
         self.client.write_single_register(MODBUS_D_BASE + 101, 1)

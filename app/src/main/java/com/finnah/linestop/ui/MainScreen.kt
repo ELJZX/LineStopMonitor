@@ -29,6 +29,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,15 +55,22 @@ fun MainScreen(vm: LineStopViewModel) {
     val alarms by vm.alarms.collectAsStateWithLifecycle()
     val dialogAlarm by vm.dialogAlarm.collectAsStateWithLifecycle()
     val shift by vm.shift.collectAsStateWithLifecycle()
+    val shiftPrompt by vm.shiftPrompt.collectAsStateWithLifecycle()
     val logs by vm.logs.collectAsStateWithLifecycle()
     val ip by vm.ip.collectAsStateWithLifecycle()
     val port by vm.port.collectAsStateWithLifecycle()
+    val monitorUrl by vm.monitorUrl.collectAsStateWithLifecycle()
 
     var showSettings by remember { mutableStateOf(false) }
     var showAccess by remember { mutableStateOf(false) }
     var showLogs by remember { mutableStateOf(false) }
     var showOperator by remember { mutableStateOf(false) }
     var showEndShift by remember { mutableStateOf(false) }
+
+    // Датчик сработал без начатой смены — автоматически предлагаем принять смену
+    LaunchedEffect(shiftPrompt, shift) {
+        if (shiftPrompt && shift == null) showOperator = true
+    }
 
     val openAlarms = remember(alarms) { alarms.filter { !it.closed } }
     val history = remember(alarms) {
@@ -92,8 +100,10 @@ fun MainScreen(vm: LineStopViewModel) {
                         Button(onClick = { showOperator = true }) { Text("Начать работу") }
                     } else {
                         Text(
-                            text = "Оператор: ${currentShift.operator} · " +
-                                    "с ${formatShortTime(currentShift.startTime)} · " +
+                            text = "Оператор: ${currentShift.operator}" +
+                                    (if (currentShift.mechanic.isNotBlank())
+                                        " · Механик: ${currentShift.mechanic}" else "") +
+                                    " · с ${formatShortTime(currentShift.startTime)} · " +
                                     formatDuration(currentShift.duration(snapshot.lastUpdate))
                         )
                         Spacer(Modifier.width(8.dp))
@@ -115,10 +125,10 @@ fun MainScreen(vm: LineStopViewModel) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             item {
-                StatusCard(snapshot, openAlarms.size)
+                StatusCard(snapshot, openAlarms.size, shiftActive = shift != null)
             }
 
-            if (openAlarms.isNotEmpty()) {
+            if (shift != null && openAlarms.isNotEmpty()) {
                 item {
                     Text(
                         "Активные аварии",
@@ -186,9 +196,11 @@ fun MainScreen(vm: LineStopViewModel) {
         SettingsDialog(
             currentIp = ip,
             currentPort = port,
-            onSave = { newIp, newPort ->
+            currentMonitorUrl = monitorUrl,
+            onSave = { newIp, newPort, newMonitorUrl ->
                 vm.updateIp(newIp)
                 vm.updatePort(newPort)
+                vm.updateMonitorUrl(newMonitorUrl)
                 showSettings = false
             },
             onClearHistory = {
@@ -205,17 +217,22 @@ fun MainScreen(vm: LineStopViewModel) {
 
     if (showOperator) {
         OperatorDialog(
-            onConfirm = { name ->
-                vm.startShift(name)
+            alert = shiftPrompt,
+            onConfirm = { name, mechanic ->
+                vm.startShift(name, mechanic)
                 showOperator = false
             },
-            onDismiss = { showOperator = false }
+            onDismiss = {
+                vm.dismissShiftPrompt()
+                showOperator = false
+            }
         )
     }
 
     if (showEndShift) {
         EndShiftDialog(
             operator = shift?.operator ?: "",
+            mechanic = shift?.mechanic ?: "",
             onConfirm = {
                 vm.endShift()
                 showEndShift = false
@@ -226,7 +243,7 @@ fun MainScreen(vm: LineStopViewModel) {
 }
 
 @Composable
-private fun StatusCard(snapshot: PlcSnapshot, openCount: Int) {
+private fun StatusCard(snapshot: PlcSnapshot, openCount: Int, shiftActive: Boolean) {
     val infinite = rememberInfiniteTransition(label = "statusPulse")
     val pulse by infinite.animateFloat(
         initialValue = 0f,
@@ -242,6 +259,12 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int) {
     val color: Color
     val icon: String?
     when {
+        !shiftActive -> {
+            label = "СМЕНА НЕ НАЧАТА"
+            color = Color(0xFF546E7A)
+            icon = null
+        }
+
         !snapshot.connected -> {
             label = "НЕТ СВЯЗИ"
             color = Color(0xFF616161)
@@ -290,7 +313,7 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int) {
                     )
                 }
                 when {
-                    snapshot.alarmActive -> {
+                    shiftActive && snapshot.alarmActive -> {
                         Spacer(Modifier.height(4.dp))
                         Text(
                             "Сигнал аварии активен (линия остановлена)",
@@ -299,7 +322,7 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int) {
                         )
                     }
 
-                    openCount > 0 -> {
+                    shiftActive && openCount > 0 -> {
                         Spacer(Modifier.height(4.dp))
                         Text(
                             "Незакрытых аварий: $openCount — укажите причину",

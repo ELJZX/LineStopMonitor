@@ -65,14 +65,14 @@ class CauseCatalogTest {
         val path = CauseCatalog.find(11)
         assertNotNull(path)
         assertEquals("Технологическое оборудование", path!!.category.title)
-        assertEquals("1. Нет продукта (ожидание творога)", path.item.title)
-        assertEquals("1.1 Мойка", path.reason.title)
+        assertEquals("Нет продукта (ожидание творога)", path.item.title)
+        assertEquals("Мойка", path.reason.title)
     }
 
     @Test
     fun `полный путь причины`() {
         assertEquals(
-            "Автомат фасовки / 1. Формовка + протяжка / 1.1 Заклинил главный привод",
+            "Автомат фасовки / Формовка + протяжка / Заклинил главный привод",
             CauseCatalog.path(41)
         )
     }

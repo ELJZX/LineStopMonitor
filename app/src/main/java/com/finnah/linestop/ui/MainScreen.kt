@@ -8,6 +8,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,11 +40,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.finnah.linestop.LineStopViewModel
 import com.finnah.linestop.data.AlarmRecord
+import com.finnah.linestop.domain.AlarmEngine
 import com.finnah.linestop.plc.PlcSnapshot
 import com.finnah.linestop.util.formatDuration
 import com.finnah.linestop.util.formatShortTime
@@ -84,35 +87,56 @@ fun MainScreen(vm: LineStopViewModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         text = if (snapshot.connected) "Связь: $ip:$port" else "Нет связи",
                         color = if (snapshot.connected) Color(0xFF2E7D32) else Color(0xFFC62828),
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-
-                    Spacer(Modifier.weight(1f))
 
                     val currentShift = shift
                     if (currentShift == null) {
-                        Button(onClick = { showOperator = true }) { Text("Начать работу") }
+                        Spacer(Modifier.weight(1f))
+                        Button(
+                            onClick = { showOperator = true },
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Text("Начать работу", maxLines = 1, softWrap = false)
+                        }
                     } else {
+                        Spacer(Modifier.width(12.dp))
                         Text(
                             text = "Оператор: ${currentShift.operator}" +
                                     (if (currentShift.mechanic.isNotBlank())
                                         " · Механик: ${currentShift.mechanic}" else "") +
                                     " · с ${formatShortTime(currentShift.startTime)} · " +
-                                    formatDuration(currentShift.duration(snapshot.lastUpdate))
+                                    formatDuration(currentShift.duration(snapshot.lastUpdate)),
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Spacer(Modifier.width(8.dp))
-                        Button(onClick = { showEndShift = true }) { Text("Закончить работу") }
+                        Button(
+                            onClick = { showEndShift = true },
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Text("Закончить работу", maxLines = 1, softWrap = false)
+                        }
                     }
 
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { vm.refreshLogs(); showLogs = true }) { Text("Журнал") }
-                    TextButton(onClick = { showAccess = true }) { Text("Настройки") }
+                    TextButton(
+                        onClick = { vm.refreshLogs(); showLogs = true },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) { Text("Журнал", maxLines = 1, softWrap = false) }
+                    TextButton(
+                        onClick = { showAccess = true },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) { Text("Настройки", maxLines = 1, softWrap = false) }
                 }
             }
         }
@@ -173,9 +197,14 @@ fun MainScreen(vm: LineStopViewModel) {
         }
     }
 
+    val quickPick = dialogAlarm?.let { alarm ->
+        AlarmEngine.lastCause(alarms, alarm.shiftId, alarm.id)
+    }
+
     dialogAlarm?.let { alarm ->
         CauseDialog(
             alarm = alarm,
+            quickPick = quickPick,
             onConfirm = { code, path, text -> vm.acknowledge(alarm.id, code, path, text) },
             onEndShift = { showEndShift = true },
             onDismiss = { vm.dismissDialog() }
@@ -300,11 +329,11 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int, shiftActive: Boole
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text(label, color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.Bold)
+                Text(label, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
                 if (!snapshot.connected) {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -333,11 +362,11 @@ private fun StatusCard(snapshot: PlcSnapshot, openCount: Int, shiftActive: Boole
                 }
             }
             icon?.let {
-                Spacer(Modifier.width(16.dp))
+                Spacer(Modifier.width(12.dp))
                 Text(
                     text = it,
                     color = Color.White,
-                    fontSize = 120.sp,
+                    fontSize = 64.sp,
                     fontWeight = FontWeight.Bold
                 )
             }

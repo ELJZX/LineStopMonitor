@@ -44,7 +44,9 @@ data class AlarmRecord(
         get() = when {
             causeCode == null -> null
             CauseCatalog.isOther(causeCode) ->
-                causeText?.takeIf { it.isNotBlank() } ?: "Другая причина"
+                causePath?.takeIf { it.isNotBlank() }
+                    ?: causeText?.takeIf { it.isNotBlank() }
+                    ?: "Другая причина"
             else -> causePath ?: CauseCatalog.reasonTitle(causeCode) ?: "Код $causeCode"
         }
 }

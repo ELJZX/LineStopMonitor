@@ -63,6 +63,16 @@ class AlarmRecordTest {
     }
 
     @Test
+    fun `другая причина с полным путём показывает путь`() {
+        val path = "Автомат фасовки / Дозировка + фольга / Другая причина:Порвался ремень"
+        val alarm = AlarmRecord(
+            id = 1, stopTime = 0L, causeCode = 19,
+            causeText = "Порвался ремень", causePath = path
+        )
+        assertEquals(path, alarm.causeLabel)
+    }
+
+    @Test
     fun `другая причина без текста`() {
         val alarm = AlarmRecord(id = 1, stopTime = 0L, causeCode = 19)
         assertEquals("Другая причина", alarm.causeLabel)

@@ -387,4 +387,32 @@ class AlarmEngineTest {
         assertTrue(alarm.dialogShown)
         assertEquals(3_000L, alarm.durationMs)
     }
+
+    // ----------------------------------------------------------- lastCause
+
+    @Test
+    fun `последняя причина пуста для новой смены`() {
+        val list = listOf(AlarmRecord(id = 1L, stopTime = 0L, shiftId = 1L, causeCode = 5))
+        assertNull(AlarmEngine.lastCause(list, shiftId = 2L))
+        assertNull(AlarmEngine.lastCause(list, shiftId = null))
+    }
+
+    @Test
+    fun `последняя причина берётся из своей смены`() {
+        val list = listOf(
+            AlarmRecord(id = 1L, stopTime = 0L, shiftId = 1L, causeCode = 5),
+            AlarmRecord(id = 2L, stopTime = 0L, shiftId = 1L, causeCode = 7),
+            AlarmRecord(id = 3L, stopTime = 0L, shiftId = 1L),
+            AlarmRecord(id = 4L, stopTime = 0L, shiftId = 2L, causeCode = 9)
+        )
+        val last = AlarmEngine.lastCause(list, shiftId = 1L)
+        assertEquals(2L, last?.id)
+        assertEquals(7, last?.causeCode)
+    }
+
+    @Test
+    fun `последняя причина не возвращает саму аварию`() {
+        val list = listOf(AlarmRecord(id = 1L, stopTime = 0L, shiftId = 1L, causeCode = 5))
+        assertNull(AlarmEngine.lastCause(list, shiftId = 1L, excludeId = 1L))
+    }
 }

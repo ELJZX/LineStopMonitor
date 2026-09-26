@@ -160,6 +160,22 @@ object AlarmEngine {
 
     fun nextId(alarms: List<AlarmRecord>): Long = (alarms.maxOfOrNull { it.id } ?: 0L) + 1L
 
+    /**
+     * Последняя выбранная причина в рамках смены — для быстрого повторного
+     * выбора. Возвращает null, пока в этой смене ещё не выбрали ни одной причины
+     * (первый ответ оператор даёт вручную).
+     */
+    fun lastCause(
+        alarms: List<AlarmRecord>,
+        shiftId: Long?,
+        excludeId: Long? = null
+    ): AlarmRecord? {
+        if (shiftId == null) return null
+        return alarms
+            .filter { it.shiftId == shiftId && it.causeCode != null && it.id != excludeId }
+            .maxByOrNull { it.id }
+    }
+
     private fun newAlarm(id: Long, now: Long, shiftId: Long?, startCounter: Int) =
         AlarmRecord(id = id, stopTime = now, shiftId = shiftId, startCounter = startCounter)
 

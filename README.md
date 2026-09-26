@@ -234,6 +234,9 @@ py -3 web\server.py --host 0.0.0.0 --port 8080 --db web\linestop_web.db
 автопредложение принять смену (сработал датчик без смены) и отклонение этого
 предложения; с фильтром по датам/оператору/механику и экспортом в Excel.
 
+Кнопка **«Скачать APK»** отдаёт собранный `app-debug.apk`
+(`GET /download/app.apk`); путь можно задать через `--apk`.
+
 В приложении: **Настройки → «Адрес сервера мониторинга»** — например
 `http://172.16.29.1:8080` (пусто — отправка выключена). События уходят пачками
 на `POST /api/events`, при обрыве связи остаются в очереди и досылаются позже.
@@ -254,7 +257,7 @@ API: `GET /api/events`, `GET /api/alarms?from=&to=&operator=&mechanic=`,
 
 ```powershell
 py -3 -m unittest discover -s simulator -p "test_*.py" -v   # 11 тестов
-py -3 -m unittest web.test_server -v                        # 27 тестов
+py -3 -m unittest web.test_server -v                        # 30 тестов
 ```
 
 ---

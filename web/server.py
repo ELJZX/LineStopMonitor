@@ -432,7 +432,20 @@ class EventStore:
             ).fetchone()
             by_cause = con.execute(
                 """
-                SELECT COALESCE(cause_path, cause_text, 'Причина не указана') AS cause,
+                SELECT CASE
+                         WHEN cause_code IS NOT NULL AND (cause_code %% 10) = 9 THEN
+                           CASE
+                             WHEN cause_path IS NOT NULL AND cause_path != '' THEN
+                               CASE
+                                 WHEN cause_text IS NOT NULL AND cause_text != ''
+                                      AND instr(cause_path, cause_text) = 0
+                                 THEN cause_path || ':' || cause_text
+                                 ELSE cause_path
+                               END
+                             ELSE COALESCE(cause_text, 'Причина не указана')
+                           END
+                         ELSE COALESCE(cause_path, cause_text, 'Причина не указана')
+                       END AS cause,
                        COUNT(*) AS count,
                        COALESCE(SUM(duration_ms), 0) AS duration_ms
                 FROM alarms%s
@@ -493,6 +506,7 @@ class EventStore:
 class _Handler(BaseHTTPRequestHandler):
     server_version = "LineStopMonitor/1.0"
     store = None  # устанавливается фабрикой
+    apk_path = None  # путь к APK для скачивания
 
     # ------------------------------------------------------------- helpers
     def _json(self, payload, status=200):
@@ -588,6 +602,8 @@ class _Handler(BaseHTTPRequestHandler):
                 date_from, date_to, operator, mechanic)})
         if path == "/api/export-shifts.xlsx":
             return self._export_shifts(date_from, date_to, operator, mechanic)
+        if path in ("/download/app.apk", "/app.apk"):
+            return self._download_apk()
         if path == "/api/summary":
             return self._json(
                 self.store.summary(date_from, date_to, operator, mechanic))
@@ -617,7 +633,7 @@ class _Handler(BaseHTTPRequestHandler):
                 ms_to_text(a.get("start_time")),
                 ms_to_text_short(a.get("duration_ms")),
                 round((a.get("duration_ms") or 0) / 1000.0, 1),
-                a.get("cause_path") or a.get("cause_text") or "Причина не указана",
+                effective_cause(a),
                 a.get("cause_code"),
                 "закрыта" if a.get("closed") else "открыта",
             ])
@@ -679,6 +695,18 @@ class _Handler(BaseHTTPRequestHandler):
             "linestop_shifts_%s.xlsx" % stamp,
         )
 
+    def _download_apk(self):
+        path = type(self).apk_path
+        if not path or not os.path.exists(path):
+            return self._error(404, "APK not found")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        self._bytes(
+            data,
+            "application/vnd.android.package-archive",
+            "linestop-monitor.apk",
+        )
+
     def do_POST(self):
         path, _, _ = self.path.partition("?")
         if path != "/api/events":
@@ -734,6 +762,23 @@ def ms_to_text(ms):
     if not ms:
         return ""
     return datetime.fromtimestamp(ms / 1000.0).strftime("%d.%m.%Y %H:%M:%S")
+
+
+def effective_cause(alarm):
+    """Причина для отображения.
+
+    Для «Другой причины» — формат «Категория / Пункт / Другая причина:<текст>».
+    """
+    code = alarm.get("cause_code")
+    text = alarm.get("cause_text")
+    path = alarm.get("cause_path")
+    if code is not None and (code % 10) == 9:
+        if path:
+            if text and text not in path:
+                return path + ":" + text
+            return path
+        return text or "Другая причина"
+    return path or text or "Причина не указана"
 
 
 def ms_to_text_short(ms):
@@ -860,16 +905,17 @@ def normalize_payload(payload):
     return [], device_id
 
 
-def make_handler(store):
+def make_handler(store, apk_path=None):
     class Handler(_Handler):
         pass
     Handler.store = store
+    Handler.apk_path = apk_path
     return Handler
 
 
-def create_server(host, port, db_path):
+def create_server(host, port, db_path, apk_path=None):
     store = EventStore(db_path)
-    return ThreadingHTTPServer((host, port), make_handler(store))
+    return ThreadingHTTPServer((host, port), make_handler(store, apk_path))
 
 
 DASHBOARD = """<!doctype html>
@@ -944,6 +990,7 @@ DASHBOARD = """<!doctype html>
 <header>
   <h1>Line Stop Monitor — мониторинг аварий</h1>
   <div class="live"><span class="dot"></span><span id="updated">загрузка…</span></div>
+  <a class="btn excel" href="/download/app.apk">Скачать APK</a>
 </header>
 <main>
   <div class="tabs">
@@ -1127,7 +1174,17 @@ function renderAlarms(alarms) {
       <th>№</th><th>Смена</th><th>Оператор</th><th>Механик</th><th>Начало</th>
       <th>Конец</th><th>Длительность</th><th>Причина</th><th>Статус</th></tr></thead><tbody>` +
     sorted.map(a => {
-      const cause = a.cause_path || a.cause_text || (a.closed ? 'Без причины' : '—');
+      let cause;
+      if (a.cause_code != null && a.cause_code % 10 === 9) {
+        if (a.cause_path) {
+          cause = (a.cause_text && !a.cause_path.includes(a.cause_text))
+            ? (a.cause_path + ':' + a.cause_text) : a.cause_path;
+        } else {
+          cause = a.cause_text || 'Другая причина';
+        }
+      } else {
+        cause = a.cause_path || a.cause_text || (a.closed ? 'Без причины' : '—');
+      }
       const end = a.start_time ? fmtTime(a.start_time) : (a.closed ? '—' : 'идёт');
       const dur = a.closed ? fmtDur(a.duration_ms) : 'идёт';
       return `<tr class="${a.closed ? '' : 'open'}">
@@ -1200,15 +1257,21 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--db", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "linestop_web.db"))
+    default_apk = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "app", "build", "outputs", "apk", "debug", "app-debug.apk")
+    parser.add_argument("--apk", default=default_apk,
+                        help="путь к APK для скачивания с сайта")
     args = parser.parse_args()
 
-    server = create_server(args.host, args.port, args.db)
+    server = create_server(args.host, args.port, args.db, args.apk)
     print("=" * 60)
     print("Line Stop Monitor — веб-мониторинг")
     print("База данных: %s" % os.path.abspath(args.db))
     print("Панель:      http://%s:%d/" % (
         "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host, args.port))
     print("Приём:       POST http://<host>:%d/api/events" % args.port)
+    print("APK:         http://<host>:%d/download/app.apk" % args.port)
     print("В Android:   Настройки -> адрес сервера мониторинга")
     print("=" * 60)
     try:

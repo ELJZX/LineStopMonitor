@@ -425,6 +425,95 @@ class WebServerTest(unittest.TestCase):
             self.assertIn("Иванов", sheet)
 
 
+    def test_25_other_cause_shows_operator_text(self):
+        t = 1_000_000_600_000
+        base = "Автомат фасовки / Дозировка + фольга / Другая причина"
+
+        # старый формат: в пути нет текста -> добавляем ":текст"
+        self.post_json("/api/events", {
+            "deviceId": "other", "alarmId": 501, "time": t, "stopTime": t,
+            "type": "ALARM_START", "category": "ALARM", "message": "s"})
+        self.post_json("/api/events", {
+            "deviceId": "other", "alarmId": 501, "time": t + 1_000,
+            "stopTime": t, "startTime": t + 1_000, "durationMs": 1_000,
+            "type": "CAUSE_SELECTED", "category": "ALARM", "message": "c",
+            "causeCode": 19, "causeText": "Порвался ремень", "causePath": base})
+        # новый формат: путь уже содержит текст -> без дублирования
+        t2 = t + 100_000
+        self.post_json("/api/events", {
+            "deviceId": "other", "alarmId": 502, "time": t2, "stopTime": t2,
+            "type": "ALARM_START", "category": "ALARM", "message": "s"})
+        self.post_json("/api/events", {
+            "deviceId": "other", "alarmId": 502, "time": t2 + 1_000,
+            "stopTime": t2, "startTime": t2 + 1_000, "durationMs": 1_000,
+            "type": "CAUSE_SELECTED", "category": "ALARM", "message": "c",
+            "causeCode": 19, "causeText": "Заклинило",
+            "causePath": base + ":Заклинило"})
+        q = "?from=%d&to=%d" % (t - 1, t2 + 5_000)
+
+        expected1 = base + ":Порвался ремень"
+        expected2 = base + ":Заклинило"
+        causes = {c["cause"] for c in self.get_json("/api/summary" + q)["by_cause"]}
+        self.assertIn(expected1, causes)
+        self.assertIn(expected2, causes)
+        self.assertNotIn(base, causes)
+
+        status, _, body = self.request("GET", "/api/export.xlsx" + q)
+        self.assertEqual(200, status)
+        with zipfile.ZipFile(BytesIO(body)) as z:
+            sheet = z.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            self.assertIn("Другая причина:Порвался ремень", sheet)
+            self.assertIn("Другая причина:Заклинило", sheet)
+            self.assertNotIn("Другая причина&lt;", sheet)
+
+
+class ApkDownloadTest(unittest.TestCase):
+
+    def _serve(self, apk_path):
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(db)
+        server = create_server("127.0.0.1", 0, db, apk_path=apk_path)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, db
+
+    def test_apk_download(self):
+        fd, apk = tempfile.mkstemp(suffix=".apk")
+        os.close(fd)
+        with open(apk, "wb") as fh:
+            fh.write(b"PK\x03\x04fake-apk-bytes")
+        server, db = self._serve(apk)
+        try:
+            url = "http://127.0.0.1:%d/download/app.apk" % server.server_address[1]
+            with urllib.request.urlopen(url, timeout=5) as r:
+                body = r.read()
+                ctype = r.headers.get("Content-Type")
+                disp = r.headers.get("Content-Disposition", "")
+            self.assertEqual(b"PK\x03\x04fake-apk-bytes", body)
+            self.assertEqual("application/vnd.android.package-archive", ctype)
+            self.assertIn(".apk", disp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            os.unlink(apk)
+            if os.path.exists(db):
+                os.unlink(db)
+
+    def test_apk_missing_returns_404(self):
+        server, db = self._serve(os.path.join(tempfile.gettempdir(), "nope.apk"))
+        try:
+            url = "http://127.0.0.1:%d/download/app.apk" % server.server_address[1]
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(url, timeout=5)
+            self.assertEqual(404, ctx.exception.code)
+            ctx.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            if os.path.exists(db):
+                os.unlink(db)
+
+
 class StorePersistenceTest(unittest.TestCase):
     def test_events_persist_across_reopen(self):
         fd, path = tempfile.mkstemp(suffix=".db")

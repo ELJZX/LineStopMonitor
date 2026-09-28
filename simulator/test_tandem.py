@@ -47,7 +47,7 @@ class TandemTest(unittest.TestCase):
         fd, self.db_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         os.unlink(self.db_path)
-        self.web = create_server("127.0.0.1", 0, self.db_path)
+        self.web = create_server("127.0.0.1", 0, self.db_path, require_auth=False)
         self.web_port = self.web.server_address[1]
         threading.Thread(target=self.web.serve_forever, daemon=True).start()
         self.web_url = "http://127.0.0.1:%d" % self.web_port

@@ -19,8 +19,10 @@ API:
 """
 
 import argparse
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import threading
@@ -32,6 +34,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 
 DEFAULT_PORT = 8080
+SESSION_COOKIE = "lsm_session"
+SESSION_TTL = 8 * 3600
+
+# Пользователи веб-панели. Пароли хранятся SHA-256-хешем.
+USERS = {
+    "admin": {
+        "hash": hashlib.sha256("admin".encode("utf-8")).hexdigest(),
+        "role": "admin",
+    }
+}
+
+# Активные сессии: token -> {"user", "role", "expires"}
+SESSIONS = {}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -311,6 +326,29 @@ class EventStore:
                     (stop, start, duration, r["device_id"], r["alarm_id"]),
                 )
 
+    # ------------------------------------------------------------ deletion
+    def delete_event(self, event_id):
+        with self._lock, self._session() as con:
+            events = con.execute(
+                "DELETE FROM events WHERE id = ?", (event_id,)).rowcount
+        return {"events": events, "alarms": 0}
+
+    def delete_alarm(self, device_id, alarm_id):
+        with self._lock, self._session() as con:
+            alarms = con.execute(
+                "DELETE FROM alarms WHERE device_id = ? AND alarm_id = ?",
+                (device_id, alarm_id)).rowcount
+            events = con.execute(
+                "DELETE FROM events WHERE device_id = ? AND alarm_id = ?",
+                (device_id, alarm_id)).rowcount
+        return {"events": events, "alarms": alarms}
+
+    def delete_all(self):
+        with self._lock, self._session() as con:
+            events = con.execute("DELETE FROM events").rowcount
+            alarms = con.execute("DELETE FROM alarms").rowcount
+        return {"events": events, "alarms": alarms}
+
     # ------------------------------------------------------------- queries
     def events(self, limit=200, since_id=0, event_type=None, device_id=None):
         query = "SELECT * FROM events WHERE id > ?"
@@ -507,6 +545,7 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "LineStopMonitor/1.0"
     store = None  # устанавливается фабрикой
     apk_path = None  # путь к APK для скачивания
+    require_auth = True
 
     # ------------------------------------------------------------- helpers
     def _json(self, payload, status=200):
@@ -540,6 +579,55 @@ class _Handler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._json({"error": message}, status)
 
+    # --------------------------------------------------------------- auth
+    def _token(self):
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == SESSION_COOKIE:
+                return value
+        return None
+
+    def _user(self):
+        if not type(self).require_auth:
+            return {"user": "local", "role": "admin"}
+        token = self._token()
+        if not token:
+            return None
+        session = SESSIONS.get(token)
+        if not session:
+            return None
+        if session["expires"] < time.time():
+            SESSIONS.pop(token, None)
+            return None
+        return {"user": session["user"], "role": session["role"]}
+
+    def _require_auth(self):
+        user = self._user()
+        if user is None:
+            if self.path.startswith("/api/"):
+                self._error(401, "unauthorized")
+            else:
+                self._redirect("/login")
+            return None
+        return user
+
+    def _require_admin(self):
+        user = self._require_auth()
+        if user is None:
+            return None
+        if user.get("role") != "admin":
+            self._error(403, "forbidden")
+            return None
+        return user
+
+    def _redirect(self, location, cookie=None):
+        self.send_response(303)
+        self.send_header("Location", location)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+
     def _read_json(self):
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
@@ -570,10 +658,24 @@ class _Handler(BaseHTTPRequestHandler):
         operator = params.get("operator") or None
         mechanic = params.get("mechanic") or None
 
-        if path == "/" or path == "/index.html":
-            return self._html(DASHBOARD)
+        if path == "/login":
+            if self._user():
+                return self._redirect("/")
+            return self._html(LOGIN_PAGE)
+        if path == "/logout":
+            token = self._token()
+            if token:
+                SESSIONS.pop(token, None)
+            return self._redirect(
+                "/login", SESSION_COOKIE + "=; Path=/; Max-Age=0; HttpOnly")
         if path == "/api/health":
             return self._json({"status": "ok", "time": now_ms()})
+        if self._require_auth() is None:
+            return
+        if path == "/api/me":
+            return self._json(self._user())
+        if path == "/" or path == "/index.html":
+            return self._html(DASHBOARD)
         if path == "/api/events":
             return self._json({
                 "events": self.store.events(
@@ -709,9 +811,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path, _, _ = self.path.partition("?")
-        if path != "/api/events":
-            return self._error(404, "not found")
+        if path == "/login":
+            return self._do_login()
+        if path == "/api/events":
+            return self._ingest_events()
+        if path == "/api/delete":
+            if self._require_admin() is None:
+                return
+            return self._do_delete()
+        self._error(404, "not found")
 
+    def _ingest_events(self):
         payload = self._read_json()
         if payload is False:
             return self._error(400, "invalid json")
@@ -729,6 +839,52 @@ class _Handler(BaseHTTPRequestHandler):
 
         ids = self.store.add_events(events)
         self._json({"accepted": len(events), "ids": ids}, 201)
+
+    def _do_login(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        form = parse_query(raw)
+        username = (form.get("username") or "").strip()
+        password = form.get("password") or ""
+        account = USERS.get(username)
+        if account is None or \
+                hashlib.sha256(password.encode("utf-8")).hexdigest() != account["hash"]:
+            html = LOGIN_PAGE.replace(
+                "<!--ERROR-->",
+                '<p class="err">Неверный логин или пароль</p>'
+            )
+            return self._html(html, 401)
+        token = secrets.token_urlsafe(32)
+        SESSIONS[token] = {
+            "user": username,
+            "role": account["role"],
+            "expires": time.time() + SESSION_TTL,
+        }
+        cookie = "%s=%s; Path=/; HttpOnly; Max-Age=%d" % (
+            SESSION_COOKIE, token, SESSION_TTL)
+        self._redirect("/", cookie)
+
+    def _do_delete(self):
+        payload = self._read_json()
+        if not isinstance(payload, dict):
+            return self._error(400, "invalid json")
+        scope = payload.get("scope")
+        if scope == "all":
+            counts = self.store.delete_all()
+        elif scope == "event":
+            event_id = payload.get("id")
+            if event_id is None:
+                return self._error(400, "id required")
+            counts = self.store.delete_event(int(event_id))
+        elif scope == "alarm":
+            device_id = payload.get("device_id")
+            alarm_id = payload.get("alarm_id")
+            if not device_id or alarm_id is None:
+                return self._error(400, "device_id and alarm_id required")
+            counts = self.store.delete_alarm(str(device_id), int(alarm_id))
+        else:
+            return self._error(400, "unknown scope")
+        self._json({"deleted": counts})
 
 
 def parse_query(query):
@@ -905,17 +1061,53 @@ def normalize_payload(payload):
     return [], device_id
 
 
-def make_handler(store, apk_path=None):
+def make_handler(store, apk_path=None, require_auth=True):
     class Handler(_Handler):
         pass
     Handler.store = store
     Handler.apk_path = apk_path
+    Handler.require_auth = require_auth
     return Handler
 
 
-def create_server(host, port, db_path, apk_path=None):
+def create_server(host, port, db_path, apk_path=None, require_auth=True):
     store = EventStore(db_path)
-    return ThreadingHTTPServer((host, port), make_handler(store, apk_path))
+    return ThreadingHTTPServer(
+        (host, port), make_handler(store, apk_path, require_auth))
+
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход — Line Stop Monitor</title>
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center;
+         justify-content:center; background:#0f141a; color:#e6edf3;
+         font-family:"Segoe UI",Roboto,Arial,sans-serif; }
+  form { background:#161d26; border:1px solid #232c38; border-radius:14px;
+         padding:28px 28px 24px; width:320px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:#8b98a5; font-size:13px; margin-bottom:18px; }
+  label { display:block; font-size:13px; color:#8b98a5; margin:12px 0 6px; }
+  input { width:100%; box-sizing:border-box; background:#0f141a; color:#e6edf3;
+          border:1px solid #2c3745; border-radius:8px; padding:10px 12px;
+          font-size:14px; }
+  button { width:100%; margin-top:18px; background:#4338ca; color:#fff;
+           border:0; border-radius:8px; padding:11px; font-size:14px;
+           font-weight:600; cursor:pointer; }
+  .err { color:#ff6b6b; font-size:13px; margin:12px 0 0; }
+</style></head><body>
+<form method="post" action="/login">
+  <h1>Line Stop Monitor</h1>
+  <div class="sub">Вход в панель мониторинга</div>
+  <label>Логин</label>
+  <input name="username" autocomplete="username" autofocus>
+  <label>Пароль</label>
+  <input name="password" type="password" autocomplete="current-password">
+  <button type="submit">Войти</button>
+  <!--ERROR-->
+</form>
+</body></html>"""
 
 
 DASHBOARD = """<!doctype html>
@@ -952,6 +1144,10 @@ DASHBOARD = """<!doctype html>
   .btn:hover { background: #38434f; }
   .btn.primary { background: #4338ca; border-color: #4338ca; }
   .btn.excel { background: #166534; border-color: #166534; }
+  .who { font-size: 13px; color: #8b98a5; }
+  .del { display: none; background: #7f1d1d; border-color: #7f1d1d;
+         padding: 4px 10px; font-size: 12px; }
+  body.is-admin .del { display: inline-block; }
   .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
   .tab { background: #161d26; color: #8b98a5; border: 1px solid #232c38;
          border-radius: 10px; padding: 10px 18px; font-size: 14px;
@@ -990,7 +1186,9 @@ DASHBOARD = """<!doctype html>
 <header>
   <h1>Line Stop Monitor — мониторинг аварий</h1>
   <div class="live"><span class="dot"></span><span id="updated">загрузка…</span></div>
+  <span class="who" id="who"></span>
   <a class="btn excel" href="/download/app.apk">Скачать APK</a>
+  <a class="btn" href="/logout">Выйти</a>
 </header>
 <main>
   <div class="tabs">
@@ -1015,6 +1213,7 @@ DASHBOARD = """<!doctype html>
     <div class="section-head">
       <h2 style="margin:0">Сводка и аварии</h2>
       <div class="spacer"></div>
+      <button class="btn del" onclick="deleteAll()">Очистить всё</button>
       <a class="btn excel" id="export" href="/api/export.xlsx">Экспорт аварий в Excel</a>
     </div>
     <div class="cards" id="cards"></div>
@@ -1089,7 +1288,43 @@ function queryString() {
   return p.length ? '?' + p.join('&') : '';
 }
 
-async function j(url) { return (await fetch(url)).json(); }
+async function j(url) {
+  const r = await fetch(url);
+  if (r.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
+  return r.json();
+}
+
+let isAdmin = false;
+async function loadMe() {
+  try {
+    const me = await j('/api/me');
+    document.getElementById('who').textContent = 'Пользователь: ' + me.user;
+    isAdmin = (me.role === 'admin');
+    if (isAdmin) document.body.classList.add('is-admin');
+  } catch (e) { /* ignore */ }
+}
+
+async function postDelete(body) {
+  const r = await fetch('/api/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (r.status === 401) { location.href = '/login'; return; }
+  return r.json();
+}
+function deleteAlarm(deviceId, alarmId) {
+  if (!confirm('Удалить аварию #' + alarmId + ' и её события?')) return;
+  postDelete({ scope: 'alarm', device_id: deviceId, alarm_id: alarmId })
+    .then(refresh);
+}
+function deleteEvent(id) {
+  if (!confirm('Удалить запись #' + id + '?')) return;
+  postDelete({ scope: 'event', id: id }).then(refresh);
+}
+function deleteAll() {
+  if (!confirm('Удалить ВСЕ события и аварии? Действие необратимо.')) return;
+  postDelete({ scope: 'all' }).then(refresh);
+}
 
 function fillSelect(id, values, selected) {
   const el = document.getElementById(id);
@@ -1172,7 +1407,8 @@ function renderAlarms(alarms) {
     (a.closed - b.closed) || (b.stop_time - a.stop_time));
   el.innerHTML = `<table><thead><tr>
       <th>№</th><th>Смена</th><th>Оператор</th><th>Механик</th><th>Начало</th>
-      <th>Конец</th><th>Длительность</th><th>Причина</th><th>Статус</th></tr></thead><tbody>` +
+      <th>Конец</th><th>Длительность</th><th>Причина</th><th>Статус</th>
+      <th></th></tr></thead><tbody>` +
     sorted.map(a => {
       let cause;
       if (a.cause_code != null && a.cause_code % 10 === 9) {
@@ -1198,6 +1434,8 @@ function renderAlarms(alarms) {
         <td>${esc(cause)}</td>
         <td><span class="badge ${a.closed ? 'closed' : 'open'}">
           ${a.closed ? 'закрыта' : 'открыта'}</span></td>
+        <td><button class="btn del"
+            onclick="deleteAlarm('${esc(a.device_id)}',${a.alarm_id})">Удалить</button></td>
       </tr>`;
     }).join('') + '</tbody></table>';
 }
@@ -1229,15 +1467,17 @@ function renderShiftEvents(rows) {
   }
   el.innerHTML = `<table><thead><tr>
       <th>Время</th><th>Событие</th><th>Оператор</th><th>Механик</th>
-      <th>Сообщение</th></tr></thead><tbody>` +
+      <th>Сообщение</th><th></th></tr></thead><tbody>` +
     rows.map(e => `<tr>
       <td>${fmtTime(e.device_time || e.received_at)}</td>
       <td>${esc(shiftTypeLabel[e.type] || e.type || e.category)}</td>
       <td>${esc(e.operator || '—')}</td>
       <td>${esc(e.mechanic || '—')}</td>
       <td class="muted">${esc(e.message)}</td>
+      <td><button class="btn del" onclick="deleteEvent(${e.id})">Удалить</button></td>
     </tr>`).join('') + '</tbody></table>';
 }
+loadMe();
 loadFilters();
 refresh();
 setInterval(refresh, 2000);
@@ -1272,6 +1512,7 @@ def main():
         "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host, args.port))
     print("Приём:       POST http://<host>:%d/api/events" % args.port)
     print("APK:         http://<host>:%d/download/app.apk" % args.port)
+    print("Доступ:      логин admin / пароль admin")
     print("В Android:   Настройки -> адрес сервера мониторинга")
     print("=" * 60)
     try:

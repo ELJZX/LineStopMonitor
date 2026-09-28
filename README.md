@@ -237,6 +237,11 @@ py -3 web\server.py --host 0.0.0.0 --port 8080 --db web\linestop_web.db
 Кнопка **«Скачать APK»** отдаёт собранный `app-debug.apk`
 (`GET /download/app.apk`); путь можно задать через `--apk`.
 
+**Доступ** к панели защищён логином и паролем (по умолчанию `admin` / `admin`,
+пароль хранится SHA-256-хешем). Администратор может удалять события: кнопки
+«Удалить» у аварий и записей смен, а также «Очистить всё». Приём событий
+(`POST /api/events`) и `/api/health` открыты — планшеты шлют данные без входа.
+
 В приложении: **Настройки → «Адрес сервера мониторинга»** — например
 `http://172.16.29.1:8080` (пусто — отправка выключена). События уходят пачками
 на `POST /api/events`, при обрыве связи остаются в очереди и досылаются позже.
@@ -244,7 +249,8 @@ py -3 web\server.py --host 0.0.0.0 --port 8080 --db web\linestop_web.db
 API: `GET /api/events`, `GET /api/alarms?from=&to=&operator=&mechanic=`,
 `GET /api/summary?...`, `GET /api/filters`, `GET /api/shift-events?...`,
 `GET /api/export.xlsx?...`, `GET /api/export-shifts.xlsx?...`,
-`GET /api/stats`, `GET /api/health`.
+`GET /api/stats`, `GET /api/health`, `GET /api/me`, `GET /download/app.apk`;
+`POST /login`, `GET /logout`, `POST /api/events`, `POST /api/delete` (admin).
 
 Для эмулятора Android адрес хоста — `10.0.2.2`, либо проброс портов:
 
@@ -257,7 +263,7 @@ API: `GET /api/events`, `GET /api/alarms?from=&to=&operator=&mechanic=`,
 
 ```powershell
 py -3 -m unittest discover -s simulator -p "test_*.py" -v   # 11 тестов
-py -3 -m unittest web.test_server -v                        # 30 тестов
+py -3 -m unittest web.test_server -v                        # 40 тестов
 ```
 
 ---

@@ -20,7 +20,7 @@ from io import BytesIO
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from server import EventStore, create_server  # noqa: E402
+from server import EventStore, create_server, SESSION_COOKIE  # noqa: E402
 
 
 class WebServerTest(unittest.TestCase):
@@ -30,7 +30,7 @@ class WebServerTest(unittest.TestCase):
         fd, cls.db_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         os.unlink(cls.db_path)
-        cls.server = create_server("127.0.0.1", 0, cls.db_path)
+        cls.server = create_server("127.0.0.1", 0, cls.db_path, require_auth=False)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -473,7 +473,8 @@ class ApkDownloadTest(unittest.TestCase):
         fd, db = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         os.unlink(db)
-        server = create_server("127.0.0.1", 0, db, apk_path=apk_path)
+        server = create_server("127.0.0.1", 0, db, apk_path=apk_path,
+                               require_auth=False)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server, db
 
@@ -512,6 +513,130 @@ class ApkDownloadTest(unittest.TestCase):
             server.server_close()
             if os.path.exists(db):
                 os.unlink(db)
+
+
+class AuthTest(unittest.TestCase):
+    """Авторизация и удаление событий администратором."""
+
+    def setUp(self):
+        fd, self.db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(self.db)
+        self.server = create_server("127.0.0.1", 0, self.db)  # auth ВКЛ
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.cookie = None
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        self.opener = urllib.request.build_opener(NoRedirect)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        if os.path.exists(self.db):
+            os.unlink(self.db)
+
+    def request(self, method, path, json_body=None, form=None):
+        from urllib.parse import urlencode
+        url = "http://127.0.0.1:%d%s" % (self.port, path)
+        data, headers = None, {}
+        if json_body is not None:
+            data = json.dumps(json_body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        elif form is not None:
+            data = urlencode(form).encode("utf-8")
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with self.opener.open(req, timeout=5) as r:
+                status, hdrs, body = r.getcode(), dict(r.headers), r.read()
+        except urllib.error.HTTPError as exc:
+            status, hdrs, body = exc.code, dict(exc.headers), exc.read()
+            exc.close()
+        set_cookie = hdrs.get("Set-Cookie")
+        if set_cookie and set_cookie.startswith(SESSION_COOKIE + "=") \
+                and "Max-Age=0" not in set_cookie:
+            self.cookie = set_cookie.split(";")[0]
+        return status, hdrs, body
+
+    def login(self):
+        status, _, _ = self.request(
+            "POST", "/login", form={"username": "admin", "password": "admin"})
+        self.assertEqual(303, status)
+        self.assertIsNotNone(self.cookie)
+
+    def event(self):
+        return {"deviceId": "d1", "type": "APP_START", "category": "APP",
+                "level": "INFO", "message": "hi", "time": 1000}
+
+    # ---- tests ----------------------------------------------------------
+    def test_login_page(self):
+        status, _, body = self.request("GET", "/login")
+        self.assertEqual(200, status)
+        self.assertIn("Войти", body.decode("utf-8"))
+
+    def test_dashboard_requires_auth(self):
+        status, hdrs, _ = self.request("GET", "/")
+        self.assertEqual(303, status)
+        self.assertEqual("/login", hdrs.get("Location"))
+
+    def test_api_requires_auth(self):
+        status, _, _ = self.request("GET", "/api/stats")
+        self.assertEqual(401, status)
+
+    def test_ingest_is_open(self):
+        status, _, body = self.request("POST", "/api/events", json_body=self.event())
+        self.assertEqual(201, status)
+        self.assertEqual(1, json.loads(body.decode("utf-8"))["accepted"])
+
+    def test_login_success_and_access(self):
+        self.login()
+        status, _, _ = self.request("GET", "/")
+        self.assertEqual(200, status)
+        status, _, body = self.request("GET", "/api/me")
+        self.assertEqual(200, status)
+        self.assertEqual("admin", json.loads(body.decode("utf-8"))["role"])
+
+    def test_login_wrong_password(self):
+        status, _, body = self.request(
+            "POST", "/login", form={"username": "admin", "password": "nope"})
+        self.assertEqual(401, status)
+        self.assertIn("Неверный", body.decode("utf-8"))
+        self.assertIsNone(self.cookie)
+
+    def test_delete_requires_auth(self):
+        status, _, _ = self.request("POST", "/api/delete", json_body={"scope": "all"})
+        self.assertEqual(401, status)
+
+    def test_admin_deletes_event(self):
+        self.login()
+        _, _, body = self.request("POST", "/api/events", json_body=self.event())
+        event_id = json.loads(body.decode("utf-8"))["ids"][0]
+        status, _, body = self.request(
+            "POST", "/api/delete", json_body={"scope": "event", "id": event_id})
+        self.assertEqual(200, status)
+        self.assertEqual(1, json.loads(body.decode("utf-8"))["deleted"]["events"])
+        _, _, body = self.request("GET", "/api/events")
+        self.assertEqual([], json.loads(body.decode("utf-8"))["events"])
+
+    def test_admin_deletes_all(self):
+        self.login()
+        self.request("POST", "/api/events", json_body=self.event())
+        status, _, _ = self.request("POST", "/api/delete", json_body={"scope": "all"})
+        self.assertEqual(200, status)
+        _, _, body = self.request("GET", "/api/stats")
+        self.assertEqual(0, json.loads(body.decode("utf-8"))["events"])
+
+    def test_logout_clears_session(self):
+        self.login()
+        self.request("GET", "/logout")
+        status, hdrs, _ = self.request("GET", "/")
+        self.assertEqual(303, status)
 
 
 class StorePersistenceTest(unittest.TestCase):

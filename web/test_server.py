@@ -766,6 +766,59 @@ class AuthTest(unittest.TestCase):
         self.assertIsNone(json.loads(body.decode("utf-8")))
 
 
+class CurrentShiftTest(unittest.TestCase):
+    """Текущая смена и аварии текущей смены."""
+
+    def setUp(self):
+        fd, self.db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(self.db)
+        self.server = create_server("127.0.0.1", 0, self.db, require_auth=False)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        if os.path.exists(self.db):
+            os.unlink(self.db)
+
+    def post(self, event):
+        url = "http://127.0.0.1:%d/api/events" % self.port
+        data = json.dumps(event).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status
+
+    def get(self, path):
+        with urllib.request.urlopen(
+                "http://127.0.0.1:%d%s" % (self.port, path), timeout=5) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    def test_current_shift_and_its_alarms(self):
+        self.assertIsNone(self.get("/api/current-shift")["shift"])
+
+        self.post({"deviceId": "cs", "type": "SHIFT_START", "category": "SHIFT",
+                   "time": 1000, "shiftId": 3, "operator": "И",
+                   "mechanic": "П", "alarmId": None})
+        cur = self.get("/api/current-shift")["shift"]
+        self.assertEqual(3, cur["shift_id"])
+        self.assertEqual("И", cur["operator"])
+
+        self.post({"deviceId": "cs", "type": "ALARM_START", "category": "ALARM",
+                   "time": 2000, "stopTime": 2000, "alarmId": 701, "shiftId": 3,
+                   "operator": "И", "mechanic": "П"})
+        alarms = self.get("/api/alarms?shift_id=3&device_id=cs")["alarms"]
+        self.assertEqual([701], [a["alarm_id"] for a in alarms])
+
+        self.post({"deviceId": "cs", "type": "SHIFT_END", "category": "SHIFT",
+                   "time": 5000, "shiftId": 3, "operator": "И",
+                   "mechanic": "П", "alarmId": None})
+        self.assertIsNone(self.get("/api/current-shift")["shift"])
+
+
 class StorePersistenceTest(unittest.TestCase):
     def test_events_persist_across_reopen(self):
         fd, path = tempfile.mkstemp(suffix=".db")

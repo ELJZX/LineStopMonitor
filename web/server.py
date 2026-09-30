@@ -1822,7 +1822,7 @@ function renderTimeline(alarms, dayMs) {
     }
     if (i > 0) {
       const yA = yv(valOf(segs[i - 1])).toFixed(1);
-      p.push(`<line x1="${x0}" y1="${yA}" x2="${x0}" y2="${y}" stroke="#5b6673" stroke-width="1.2"/>`);
+      p.push(`<line x1="${x0}" y1="${yA}" x2="${x0}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.2"/>`);
     }
   });
 

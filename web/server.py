@@ -1354,6 +1354,8 @@ DASHBOARD = """<!doctype html>
        background: #0f141a; }
   tr.open td { background: #1e1315; }
   tr.open td:first-child { box-shadow: inset 3px 0 0 #ff5c5c; }
+  tr.row-hit td { background: rgba(255, 193, 7, .22) !important;
+                  box-shadow: inset 3px 0 0 #ffc107; }
   .badge { display:inline-block; padding: 2px 8px; border-radius: 999px;
            font-size: 11px; font-weight: 700; }
   .badge.open { background: #7f1d1d; color: #ffd7d7; }
@@ -1659,7 +1661,7 @@ function renderAlarmTable(elId, alarms, emptyText) {
       }
       const end = a.start_time ? fmtTime(a.start_time) : (a.closed ? '—' : 'идёт');
       const dur = a.closed ? fmtDur(a.duration_ms) : 'идёт';
-      return `<tr class="${a.closed ? '' : 'open'}">
+      return `<tr class="${a.closed ? '' : 'open'}" data-key="${esc(a.device_id)}|${a.alarm_id}">
         <td>#${esc(a.alarm_id)}</td>
         <td class="muted">${a.shift_id == null ? '—' : esc(a.shift_id)}</td>
         <td>${esc(a.operator || '—')}</td>
@@ -1737,7 +1739,17 @@ async function refresh() {
   }
 }
 
-/* График: X — время суток 07:00–21:00, Y: +1 — линия в работе, -1 — авария. */
+/* Прокручивает таблицу к аварии и подсвечивает её. */
+function focusAlarm(deviceId, alarmId) {
+  const tr = document.querySelector('tr[data-key="' + deviceId + '|' + alarmId + '"]');
+  if (!tr) return;
+  tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  tr.classList.add('row-hit');
+  setTimeout(() => tr.classList.remove('row-hit'), 2600);
+}
+
+/* График: X — 07:00–21:00, Y: +1 — работа (зелёный), -1 — авария (красный),
+   ещё не наступившее время — 0. */
 function renderTimeline(alarms, dayMs) {
   const svg = document.getElementById('shiftChart');
   const empty = document.getElementById('chartEmpty');
@@ -1754,11 +1766,13 @@ function renderTimeline(alarms, dayMs) {
   const winStart = d0.getTime() + 7 * 3600 * 1000;
   const winEnd = d0.getTime() + 21 * 3600 * 1000;
   const span = winEnd - winStart;
+  const nowMs = Math.min(Date.now(), winEnd);
 
   const ints = (alarms || [])
-    .map(a => ({ s: a.stop_time, e: a.start_time || Math.min(Date.now(), winEnd) }))
+    .map(a => ({ s: a.stop_time, e: a.start_time || nowMs,
+                 dev: a.device_id, id: a.alarm_id }))
     .filter(x => x.s != null && x.e > x.s)
-    .map(x => ({ s: Math.max(winStart, x.s), e: Math.min(winEnd, x.e) }))
+    .map(x => ({ ...x, s: Math.max(winStart, x.s), e: Math.min(nowMs, x.e) }))
     .filter(x => x.e > x.s)
     .sort((a, b) => a.s - b.s);
 
@@ -1766,10 +1780,11 @@ function renderTimeline(alarms, dayMs) {
   let cur = winStart;
   for (const iv of ints) {
     if (iv.s > cur) segs.push({ work: true, s: cur, e: iv.s });
-    segs.push({ work: false, s: Math.max(cur, iv.s), e: iv.e });
+    segs.push({ work: false, s: Math.max(cur, iv.s), e: iv.e, dev: iv.dev, id: iv.id });
     cur = Math.max(cur, iv.e);
   }
-  if (cur < winEnd) segs.push({ work: true, s: cur, e: winEnd });
+  if (cur < nowMs) segs.push({ work: true, s: cur, e: nowMs });
+  if (nowMs < winEnd) segs.push({ future: true, s: nowMs, e: winEnd });
 
   const W = Math.max(320, svg.parentElement.clientWidth);
   const H = 260, padL = 56, padR = 16, padT = 16, padB = 26;
@@ -1778,9 +1793,11 @@ function renderTimeline(alarms, dayMs) {
   const plotW = W - padL - padR;
   const x = t => padL + (t - winStart) / span * plotW;
   const yv = v => mid - v * half;
+  const valOf = g => g.future ? 0 : (g.work ? 1 : -1);
+  const colorOf = g => g.future ? '#8b98a5' : (g.work ? '#2e7d32' : '#c62828');
 
-  let p = [];
-  p.push(`<line x1="${padL}" y1="${mid.toFixed(1)}" x2="${W - padR}" y2="${mid.toFixed(1)}" stroke="#2c3745" stroke-width="1"/>`);
+  const p = [];
+  p.push(`<line x1="${padL}" y1="${mid.toFixed(1)}" x2="${W - padR}" y2="${mid.toFixed(1)}" stroke="#2c3745"/>`);
   for (const v of [1, 0, -1]) {
     const yy = yv(v);
     p.push(`<text x="${padL - 8}" y="${(yy + 4).toFixed(1)}" fill="#8b98a5" font-size="11" text-anchor="end">${v > 0 ? '+' : ''}${v}</text>`);
@@ -1790,14 +1807,24 @@ function renderTimeline(alarms, dayMs) {
     p.push(`<text x="${x(t).toFixed(1)}" y="${H - 8}" fill="#8b98a5" font-size="11" text-anchor="middle">${String(hh).padStart(2, '0')}:00</text>`);
   }
 
-  const pts = [];
-  for (const g of segs) {
-    const v = g.work ? 1 : -1;
-    pts.push([x(g.s), yv(v)]);
-    pts.push([x(g.e), yv(v)]);
-  }
-  const d = pts.map((q, i) => (i ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1)).join(' ');
-  p.push(`<path d="${d}" fill="none" stroke="#1f77b4" stroke-width="1.6" stroke-linejoin="round"/>`);
+  segs.forEach((g, i) => {
+    const y = yv(valOf(g)).toFixed(1);
+    const x0 = x(g.s).toFixed(1), x1 = x(g.e).toFixed(1);
+    if (g.future) {
+      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="1.4" stroke-dasharray="4 3"/>`);
+    } else if (g.work) {
+      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.2"/>`);
+    } else {
+      const tip = 'Авария ' + fmtClock(g.s) + '–' + fmtClock(g.e) +
+        ' — нажмите, чтобы показать в таблице';
+      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="transparent" stroke-width="16" style="cursor:pointer" onclick="focusAlarm('${g.dev}','${g.id}')"><title>${tip}</title></line>`);
+      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.6" pointer-events="none"/>`);
+    }
+    if (i > 0) {
+      const yA = yv(valOf(segs[i - 1])).toFixed(1);
+      p.push(`<line x1="${x0}" y1="${yA}" x2="${x0}" y2="${y}" stroke="#5b6673" stroke-width="1.2"/>`);
+    }
+  });
 
   svg.setAttribute('width', W);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);

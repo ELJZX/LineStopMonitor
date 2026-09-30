@@ -1645,7 +1645,7 @@ function focusAlarm(deviceId, alarmId) {
   if (!tr) return;
   tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
   tr.classList.add('row-hit');
-  setTimeout(() => tr.classList.remove('row-hit'), 2600);
+  setTimeout(() => tr.classList.remove('row-hit'), 6000);
 }
 
 /* График: X — 07:00–21:00, Y: +1 — работа (зелёный), -1 — авария (красный),

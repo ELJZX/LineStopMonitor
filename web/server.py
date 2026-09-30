@@ -1413,19 +1413,19 @@ DASHBOARD = """<!doctype html>
     <h2>Текущая смена</h2>
     <div id="shiftInfo"></div>
 
-    <h2>График работы линии за смену</h2>
+    <h2 id="chartHeading">График работы линии за смену</h2>
     <div class="chart-card">
       <div class="chart-legend">
-        <span class="lg work">В работе (вверх)</span>
-        <span class="lg alarm">Авария (вниз)</span>
+        <span class="lg work">В работе (+1)</span>
+        <span class="lg alarm">Авария (-1)</span>
       </div>
       <svg id="shiftChart" height="260"></svg>
       <div id="chartEmpty" class="muted" style="display:none">
-        Нет активной смены
+        Нет данных
       </div>
     </div>
 
-    <h2>Зарегистрированные аварии (текущая смена)</h2>
+    <h2 id="alarmsHeading">Зарегистрированные аварии (текущая смена)</h2>
     <div id="currentAlarms"></div>
   </section>
 
@@ -1497,6 +1497,11 @@ function queryString() {
   if (state.operator) p.push('operator=' + encodeURIComponent(state.operator));
   if (state.mechanic) p.push('mechanic=' + encodeURIComponent(state.mechanic));
   return p.length ? '?' + p.join('&') : '';
+}
+
+function filterActive() {
+  return state.from != null || state.to != null ||
+         !!state.operator || !!state.mechanic;
 }
 
 async function j(url) {
@@ -1694,20 +1699,36 @@ async function refresh() {
     renderShiftEvents(shifts.events);
 
     const shift = cur.shift;
+    let viewAlarms = [], day = null, heading = '';
+    if (filterActive()) {
+      viewAlarms = alarms.alarms;
+      day = state.from != null ? state.from
+        : (viewAlarms.length
+            ? Math.max(...viewAlarms.map(a => a.stop_time || 0)) : Date.now());
+      heading = 'Зарегистрированные аварии (по фильтру)';
+    } else if (shift) {
+      const curAlarms = await j('/api/alarms?shift_id=' + shift.shift_id +
+        '&device_id=' + encodeURIComponent(shift.device_id));
+      viewAlarms = curAlarms.alarms;
+      day = shift.start;
+      heading = 'Зарегистрированные аварии (текущая смена)';
+    } else {
+      heading = 'Зарегистрированные аварии (текущая смена)';
+    }
+    document.getElementById('alarmsHeading').textContent = heading;
+    document.getElementById('chartHeading').textContent =
+      filterActive() ? 'График работы линии (по фильтру)'
+                     : 'График работы линии за смену';
+    renderAlarmTable('currentAlarms', viewAlarms, 'Аварий нет');
+    renderTimeline(viewAlarms, day);
+
     if (shift) {
       document.getElementById('shiftInfo').innerHTML =
         'Оператор: <b>' + esc(shift.operator || '—') + '</b> · Механик: <b>' +
         esc(shift.mechanic || '—') + '</b> · с ' + fmtTime(shift.start);
-      const curAlarms = await j('/api/alarms?shift_id=' + shift.shift_id +
-        '&device_id=' + encodeURIComponent(shift.device_id));
-      renderAlarmTable('currentAlarms', curAlarms.alarms,
-        'В текущей смене аварий нет');
-      renderTimeline(shift, curAlarms.alarms);
     } else {
       document.getElementById('shiftInfo').innerHTML =
         '<span class="muted">Смена не начата</span>';
-      renderAlarmTable('currentAlarms', [], 'В текущей смене аварий нет');
-      renderTimeline(null, []);
     }
     document.getElementById('updated').textContent =
       'обновлено ' + new Date().toLocaleTimeString('ru-RU');
@@ -1716,11 +1737,11 @@ async function refresh() {
   }
 }
 
-/* График: X — время смены, +Y — время в работе, -Y — время в аварии. */
-function renderTimeline(shift, alarms) {
+/* График: X — время суток 07:00–21:00, Y: +1 — линия в работе, -1 — авария. */
+function renderTimeline(alarms, dayMs) {
   const svg = document.getElementById('shiftChart');
   const empty = document.getElementById('chartEmpty');
-  if (!shift) {
+  if (dayMs == null) {
     svg.style.display = 'none';
     empty.style.display = '';
     return;
@@ -1728,52 +1749,56 @@ function renderTimeline(shift, alarms) {
   empty.style.display = 'none';
   svg.style.display = '';
 
-  const start = shift.start;
-  const end = Date.now();
-  const span = Math.max(1000, end - start);
+  const d0 = new Date(dayMs);
+  d0.setHours(0, 0, 0, 0);
+  const winStart = d0.getTime() + 7 * 3600 * 1000;
+  const winEnd = d0.getTime() + 21 * 3600 * 1000;
+  const span = winEnd - winStart;
 
   const ints = (alarms || [])
-    .map(a => ({ s: a.stop_time, e: a.start_time || end }))
+    .map(a => ({ s: a.stop_time, e: a.start_time || Math.min(Date.now(), winEnd) }))
     .filter(x => x.s != null && x.e > x.s)
-    .map(x => ({ s: Math.max(start, x.s), e: Math.min(end, x.e) }))
+    .map(x => ({ s: Math.max(winStart, x.s), e: Math.min(winEnd, x.e) }))
     .filter(x => x.e > x.s)
     .sort((a, b) => a.s - b.s);
 
   const segs = [];
-  let cur = start;
+  let cur = winStart;
   for (const iv of ints) {
     if (iv.s > cur) segs.push({ work: true, s: cur, e: iv.s });
     segs.push({ work: false, s: Math.max(cur, iv.s), e: iv.e });
     cur = Math.max(cur, iv.e);
   }
-  if (cur < end) segs.push({ work: true, s: cur, e: end });
+  if (cur < winEnd) segs.push({ work: true, s: cur, e: winEnd });
 
   const W = Math.max(320, svg.parentElement.clientWidth);
-  const H = 260, padL = 72, padR = 14, padT = 14, padB = 26;
+  const H = 260, padL = 56, padR = 16, padT = 16, padB = 26;
   const mid = padT + (H - padT - padB) / 2;
   const half = (H - padT - padB) / 2 - 8;
   const plotW = W - padL - padR;
-  const maxDur = Math.max(1000, ...segs.map(g => g.e - g.s));
-  const x = t => padL + (t - start) / span * plotW;
-  const h = d => Math.max(2, d / maxDur * half);
+  const x = t => padL + (t - winStart) / span * plotW;
+  const yv = v => mid - v * half;
 
   let p = [];
-  p.push(`<line x1="${padL}" y1="${mid}" x2="${W - padR}" y2="${mid}" stroke="#2c3745" stroke-width="1"/>`);
+  p.push(`<line x1="${padL}" y1="${mid.toFixed(1)}" x2="${W - padR}" y2="${mid.toFixed(1)}" stroke="#2c3745" stroke-width="1"/>`);
+  for (const v of [1, 0, -1]) {
+    const yy = yv(v);
+    p.push(`<text x="${padL - 8}" y="${(yy + 4).toFixed(1)}" fill="#8b98a5" font-size="11" text-anchor="end">${v > 0 ? '+' : ''}${v}</text>`);
+  }
+  for (let hh = 7; hh <= 21; hh += 2) {
+    const t = d0.getTime() + hh * 3600 * 1000;
+    p.push(`<text x="${x(t).toFixed(1)}" y="${H - 8}" fill="#8b98a5" font-size="11" text-anchor="middle">${String(hh).padStart(2, '0')}:00</text>`);
+  }
+
+  const pts = [];
   for (const g of segs) {
-    const x0 = x(g.s), w = Math.max(1, x(g.e) - x0), hh = h(g.e - g.s);
-    const color = g.work ? '#2e7d32' : '#c62828';
-    const y = g.work ? mid - hh : mid;
-    const label = g.work ? 'В работе' : 'Авария';
-    p.push(`<rect x="${x0.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${hh.toFixed(1)}" fill="${color}" rx="2"><title>${label}: ${fmtDur(g.e - g.s)} (${fmtClock(g.s)}–${fmtClock(g.e)})</title></rect>`);
+    const v = g.work ? 1 : -1;
+    pts.push([x(g.s), yv(v)]);
+    pts.push([x(g.e), yv(v)]);
   }
-  p.push(`<text x="${padL - 8}" y="${mid - half + 4}" fill="#8b98a5" font-size="11" text-anchor="end">+${fmtDur(maxDur)}</text>`);
-  p.push(`<text x="${padL - 8}" y="${mid + 4}" fill="#8b98a5" font-size="11" text-anchor="end">0</text>`);
-  p.push(`<text x="${padL - 8}" y="${mid + half + 4}" fill="#8b98a5" font-size="11" text-anchor="end">-${fmtDur(maxDur)}</text>`);
-  const ticks = 5;
-  for (let i = 0; i <= ticks; i++) {
-    const t = start + span * i / ticks;
-    p.push(`<text x="${x(t).toFixed(1)}" y="${H - 8}" fill="#8b98a5" font-size="11" text-anchor="middle">${fmtClock(t)}</text>`);
-  }
+  const d = pts.map((q, i) => (i ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1)).join(' ');
+  p.push(`<path d="${d}" fill="none" stroke="#1f77b4" stroke-width="1.6" stroke-linejoin="round"/>`);
+
   svg.setAttribute('width', W);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.innerHTML = p.join('');

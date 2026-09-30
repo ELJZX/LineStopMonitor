@@ -467,6 +467,30 @@ class WebServerTest(unittest.TestCase):
             self.assertNotIn("Другая причина&lt;", sheet)
 
 
+    def test_26_work_duration_in_summary(self):
+        from urllib.parse import quote
+        t = 1_000_000_800_000
+        op, mech = "Оператор_раб", "Механик_раб"
+
+        def ev(**kw):
+            base = {"deviceId": "work", "time": t, "message": "m",
+                    "operator": op, "mechanic": mech}
+            base.update(kw)
+            self.post_json("/api/events", base)
+
+        ev(type="SHIFT_START", category="SHIFT", shiftId=1, alarmId=None)
+        ev(type="ALARM_START", category="ALARM", alarmId=601, stopTime=t + 10_000)
+        ev(type="ALARM_END", category="ALARM", alarmId=601, stopTime=t + 10_000,
+           startTime=t + 70_000, durationMs=60_000)
+        ev(type="SHIFT_END", category="SHIFT", shiftId=1, alarmId=None, time=t + 300_000)
+
+        q = "?operator=%s&mechanic=%s" % (quote(op), quote(mech))
+        data = self.get_json("/api/summary" + q)
+        self.assertEqual(300_000, data["shift_duration_ms"])
+        self.assertEqual(60_000, data["total_duration_ms"])
+        self.assertEqual(240_000, data["work_duration_ms"])
+
+
 class ApkDownloadTest(unittest.TestCase):
 
     def _serve(self, apk_path):

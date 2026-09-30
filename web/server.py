@@ -454,6 +454,21 @@ class EventStore:
             where += " AND stop_time <= ?"
             params.append(date_to)
 
+        shift_where = " WHERE type IN ('SHIFT_START', 'SHIFT_END')"
+        shift_params = []
+        if operator:
+            shift_where += " AND operator = ?"
+            shift_params.append(operator)
+        if mechanic:
+            shift_where += " AND mechanic = ?"
+            shift_params.append(mechanic)
+        if date_from is not None:
+            shift_where += " AND COALESCE(device_time, received_at) >= ?"
+            shift_params.append(date_from)
+        if date_to is not None:
+            shift_where += " AND COALESCE(device_time, received_at) <= ?"
+            shift_params.append(date_to)
+
         with self._session() as con:
             totals = con.execute(
                 """
@@ -468,6 +483,12 @@ class EventStore:
                 """ % where,
                 params,
             ).fetchone()
+            shift_rows = con.execute(
+                "SELECT device_id, shift_id, type, "
+                "COALESCE(device_time, received_at) AS t "
+                "FROM events" + shift_where + " ORDER BY t",
+                shift_params,
+            ).fetchall()
             by_cause = con.execute(
                 """
                 SELECT CASE
@@ -507,6 +528,21 @@ class EventStore:
         def as_int(value):
             return int(value) if value is not None else 0
 
+        now = now_ms()
+        starts = {}
+        ends = {}
+        for r in shift_rows:
+            key = (r["device_id"], r["shift_id"])
+            if r["type"] == "SHIFT_START":
+                starts[key] = r["t"]
+            elif r["type"] == "SHIFT_END":
+                ends[key] = r["t"]
+        shift_total = 0
+        for key, start in starts.items():
+            if start:
+                shift_total += max(0, (ends.get(key) or now) - start)
+        work = max(0, shift_total - as_int(totals["total_duration"]))
+
         return {
             "total": as_int(totals["total"]),
             "closed": as_int(totals["closed"]),
@@ -515,6 +551,8 @@ class EventStore:
             "avg_duration_ms": as_int(totals["avg_duration"]),
             "max_duration_ms": as_int(totals["max_duration"]),
             "min_duration_ms": as_int(totals["min_duration"]),
+            "shift_duration_ms": shift_total,
+            "work_duration_ms": work,
             "by_cause": [dict(r) for r in by_cause],
             "by_day": [dict(r) for r in by_day],
         }
@@ -1167,6 +1205,16 @@ DASHBOARD = """<!doctype html>
   h2 { font-size: 15px; margin: 28px 0 12px; color: #cfd8e3; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .acc { background: #161d26; border: 1px solid #232c38; border-radius: 12px;
+         padding: 0 16px; align-self: start; }
+  .acc > summary { cursor: pointer; padding: 14px 0; font-size: 15px;
+                   font-weight: 600; color: #cfd8e3; list-style: none;
+                   display: flex; align-items: center; user-select: none; }
+  .acc > summary::-webkit-details-marker { display: none; }
+  .acc > summary::after { content: '▾'; margin-left: auto; color: #8b98a5;
+                          font-size: 12px; }
+  .acc[open] > summary::after { content: '▴'; }
+  .acc > div { padding-bottom: 14px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #1e2631;
            vertical-align: top; }
@@ -1219,14 +1267,14 @@ DASHBOARD = """<!doctype html>
     <div class="cards" id="cards"></div>
 
     <div class="grid2">
-      <div>
-        <h2>По причинам</h2>
+      <details class="acc">
+        <summary>По причинам</summary>
         <div id="byCause"></div>
-      </div>
-      <div>
-        <h2>По дням</h2>
+      </details>
+      <details class="acc">
+        <summary>По дням</summary>
         <div id="byDay"></div>
-      </div>
+      </details>
     </div>
 
     <h2>Зарегистрированные аварии</h2>
@@ -1372,7 +1420,9 @@ function renderCards(sum) {
     <div class="card"><div class="value">${fmtDur(sum.avg_duration_ms)}</div>
       <div class="label">Средняя длительность</div></div>
     <div class="card"><div class="value">${fmtDur(sum.total_duration_ms)}</div>
-      <div class="label">Суммарная длительность</div></div>`;
+      <div class="label">Суммарная длительность</div></div>
+    <div class="card"><div class="value">${fmtDur(sum.work_duration_ms)}</div>
+      <div class="label">Время в работе (за смены)</div></div>`;
 }
 
 function renderByCause(rows) {

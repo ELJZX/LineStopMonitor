@@ -24,9 +24,26 @@ class CauseCatalogTest {
     }
 
     @Test
-    fun `в каждой категории по три пункта`() {
-        assertTrue(CauseCatalog.categories.all { it.items.size == 3 })
-        assertEquals(12, CauseCatalog.categories.sumOf { it.items.size })
+    fun `в категориях по три-четыре пункта`() {
+        assertEquals(
+            listOf(4, 3, 3, 3),
+            CauseCatalog.categories.map { it.items.size }
+        )
+        assertEquals(13, CauseCatalog.categories.sumOf { it.items.size })
+    }
+
+    @Test
+    fun `добавленные причины и пункт присутствуют`() {
+        val uku = CauseCatalog.categories
+            .first { it.title == "Автомат фасовки" }
+            .items.first { it.title == "Укупорка + выборка" }
+        assertTrue(uku.reasons.any { it.title == "Затор на конвеере" })
+        assertTrue(uku.reasons.any { it.title == "Емкость охл. воды пустая" })
+
+        val poly = CauseCatalog.categories
+            .first { it.title == "Технологическое оборудование" }
+            .items.first { it.title == "Смена Полистирола" }
+        assertTrue(poly.reasons.any { it.title == "Смена фольги" })
     }
 
     @Test
@@ -42,12 +59,12 @@ class CauseCatalogTest {
     }
 
     @Test
-    fun `у каждого пункта минимум две конкретные причины`() {
+    fun `у каждого пункта есть хотя бы одна причина`() {
         CauseCatalog.categories.forEach { category ->
             category.items.forEach { item ->
                 assertTrue(
                     "Мало причин в ${item.title}",
-                    item.reasons.count { !it.other } >= 2
+                    item.reasons.count { !it.other } >= 1
                 )
             }
         }

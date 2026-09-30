@@ -1384,6 +1384,11 @@ const fmtClock = ms => {
   return String(d.getHours()).padStart(2, '0') + ':' +
          String(d.getMinutes()).padStart(2, '0');
 };
+const fmtDay = ms => {
+  const d = new Date(ms);
+  return String(d.getDate()).padStart(2, '0') + '.' +
+         String(d.getMonth() + 1).padStart(2, '0') + ' ' + fmtClock(ms);
+};
 const fmtDur = ms => {
   if (ms == null) return '—';
   const s = Math.round(ms / 1000);
@@ -1601,18 +1606,14 @@ async function refresh() {
     renderShiftEvents(shifts.events);
 
     const shift = cur.shift;
-    let viewAlarms = [], day = null, heading = '';
+    let viewAlarms = [], heading = '';
     if (filterActive()) {
       viewAlarms = alarms.alarms;
-      day = state.from != null ? state.from
-        : (viewAlarms.length
-            ? Math.max(...viewAlarms.map(a => a.stop_time || 0)) : Date.now());
       heading = 'Зарегистрированные аварии (по фильтру)';
     } else if (shift) {
       const curAlarms = await j('/api/alarms?shift_id=' + shift.shift_id +
         '&device_id=' + encodeURIComponent(shift.device_id));
       viewAlarms = curAlarms.alarms;
-      day = shift.start;
       heading = 'Зарегистрированные аварии (текущая смена)';
     } else {
       heading = 'Зарегистрированные аварии (текущая смена)';
@@ -1622,7 +1623,7 @@ async function refresh() {
       filterActive() ? 'График работы линии (по фильтру)'
                      : 'График работы линии за смену';
     renderAlarmTable('currentAlarms', viewAlarms, 'Аварий нет');
-    renderTimeline(viewAlarms, day);
+    renderTimeline(viewAlarms, computeChartWindow(shift, viewAlarms));
 
     if (shift) {
       document.getElementById('shiftInfo').innerHTML =
@@ -1651,33 +1652,46 @@ function focusAlarm(deviceId, alarmId) {
 /* График: X — 07:00–21:00, Y: +1 — работа (зелёный), -1 — авария (красный),
    ещё не наступившее время — 0. Поддерживает масштаб и сдвиг. */
 let chartAlarms = [];
-let chartDay = null;
-let chartView = null;   // {s,e} в мс, null — весь диапазон
+let chartWin = null;     // {s,e} окно графика
+let chartKey = null;
+let chartView = null;    // {s,e} видимый диапазон, null — весь
 let chartGeom = null;
 
-function dayWindow(dayMs) {
-  const d0 = new Date(dayMs);
-  d0.setHours(0, 0, 0, 0);
-  return { start: d0.getTime() + 7 * 3600 * 1000,
-           end: d0.getTime() + 21 * 3600 * 1000 };
+function computeChartWindow(shift, alarms) {
+  let startMs = null, endMs = null;
+  if (state.from != null) startMs = state.from;
+  if (state.to != null) endMs = state.to;
+  if (startMs == null) {
+    if (shift) startMs = shift.start;
+    else if (alarms && alarms.length)
+      startMs = Math.max(...alarms.map(a => a.stop_time || 0));
+  }
+  if (startMs == null) return null;
+  if (endMs == null) endMs = startMs;
+  const d0 = new Date(startMs); d0.setHours(0, 0, 0, 0);
+  const d1 = new Date(endMs); d1.setHours(0, 0, 0, 0);
+  return { s: d0.getTime() + 8 * 3600 * 1000,
+           e: d1.getTime() + 32 * 3600 * 1000 };
 }
 
 function tickStep(span) {
-  const steps = [5, 10, 15, 30, 60, 120, 180, 360].map(m => m * 60000);
+  const steps = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map(m => m * 60000);
   for (const s of steps) if (span / s <= 10) return s;
-  return 360 * 60000;
+  return 1440 * 60000;
 }
 
-function renderTimeline(alarms, dayMs) {
+function renderTimeline(alarms, win) {
   chartAlarms = alarms || [];
-  if (dayMs !== chartDay) { chartDay = dayMs; chartView = null; }
+  const key = win ? (win.s + '|' + win.e) : null;
+  if (key !== chartKey) { chartKey = key; chartView = null; }
+  chartWin = win;
   drawChart();
 }
 
 function drawChart() {
   const svg = document.getElementById('shiftChart');
   const empty = document.getElementById('chartEmpty');
-  if (chartDay == null) {
+  if (chartWin == null) {
     svg.style.display = 'none';
     empty.style.display = '';
     return;
@@ -1685,9 +1699,9 @@ function drawChart() {
   empty.style.display = 'none';
   svg.style.display = '';
 
-  const win = dayWindow(chartDay);
-  const winStart = win.start, winEnd = win.end;
+  const winStart = chartWin.s, winEnd = chartWin.e;
   const nowMs = Math.min(Date.now(), winEnd);
+  const multi = (winEnd - winStart) > 26 * 3600 * 1000;
 
   let viewS = chartView ? chartView.s : winStart;
   let viewE = chartView ? chartView.e : winEnd;
@@ -1734,7 +1748,7 @@ function drawChart() {
   }
   const step = tickStep(span);
   for (let t = Math.ceil(viewS / step) * step; t <= viewE; t += step) {
-    p.push(`<text x="${x(t).toFixed(1)}" y="${H - 8}" fill="#8b98a5" font-size="11" text-anchor="middle">${fmtClock(t)}</text>`);
+    p.push(`<text x="${x(t).toFixed(1)}" y="${H - 8}" fill="#8b98a5" font-size="11" text-anchor="middle">${multi ? fmtDay(t) : fmtClock(t)}</text>`);
   }
 
   const body = [];

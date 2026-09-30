@@ -819,6 +819,29 @@ class CurrentShiftTest(unittest.TestCase):
         self.assertIsNone(self.get("/api/current-shift")["shift"])
 
 
+    def test_shifts_in_range(self):
+        self.post({"deviceId": "cs", "type": "SHIFT_START", "category": "SHIFT",
+                   "time": 1000, "shiftId": 1, "operator": "Иванов",
+                   "mechanic": "Петров", "alarmId": None})
+        self.post({"deviceId": "cs", "type": "SHIFT_END", "category": "SHIFT",
+                   "time": 5000, "shiftId": 1, "operator": "Иванов",
+                   "mechanic": "Петров", "alarmId": None})
+        self.post({"deviceId": "cs", "type": "SHIFT_START", "category": "SHIFT",
+                   "time": 10000, "shiftId": 2, "operator": "Смирнов",
+                   "mechanic": "Кузнецов", "alarmId": None})
+
+        data = self.get("/api/shifts")["shifts"]
+        self.assertEqual(["Иванов", "Смирнов"], [s["operator"] for s in data])
+        self.assertEqual(5000, data[0]["end"])
+        self.assertIsNone(data[1]["end"])
+
+        period = self.get("/api/shifts?from=0&to=6000")["shifts"]
+        self.assertEqual(["Иванов"], [s["operator"] for s in period])
+
+        by_op = self.get("/api/shifts?operator=%D0%A1%D0%BC%D0%B8%D1%80%D0%BD%D0%BE%D0%B2")["shifts"]
+        self.assertEqual(["Смирнов"], [s["operator"] for s in by_op])
+
+
 class StorePersistenceTest(unittest.TestCase):
     def test_events_persist_across_reopen(self):
         fd, path = tempfile.mkstemp(suffix=".db")

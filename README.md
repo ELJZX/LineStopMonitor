@@ -225,11 +225,12 @@ py -3 web\server.py --host 0.0.0.0 --port 8080 --db web\linestop_web.db
 # панель: http://localhost:8080/
 ```
 
-Возможности панели: **фильтр аварий по датам, операторам и механикам**,
-**агрегаты** (по причинам и по дням, суммарная/средняя/максимальная
+Возможности панели: **фильтр аварий по датам и времени, операторам и
+механикам**, **агрегаты** (по причинам и по дням, суммарная/средняя/максимальная
 длительность, «Время в работе (за смены)» = длительность смен минус аварии)
 и **экспорт в Excel** (`.xlsx` с листами «Аварии», «По причинам», «По дням»,
-«Сводка»). Экспорт учитывает выбранный фильтр.
+«Сводка»). Экспорт учитывает выбранный фильтр. При фильтрации под графиком
+выводится список смен за период (оператор/механик и интервалы).
 
 Карточки сводки по умолчанию считаются за **текущую смену**, а при выборе
 фильтров (даты/оператор/механик) — за отфильтрованный период. Блок
@@ -266,7 +267,7 @@ API: `GET /api/events`, `GET /api/alarms?from=&to=&operator=&mechanic=`,
 `GET /api/filters`, `GET /api/shift-events?...`,
 `GET /api/export.xlsx?...`, `GET /api/export-shifts.xlsx?...`,
 `GET /api/stats`, `GET /api/health`, `GET /api/me`, `GET /api/current-shift`,
-`GET /download/app.apk`;
+`GET /api/shifts?from=&to=&operator=&mechanic=`, `GET /download/app.apk`;
 `POST /login`, `GET /logout`, `POST /api/events`, `POST /api/delete` (admin).
 
 Для эмулятора Android адрес хоста — `10.0.2.2`, либо проброс портов:
@@ -280,7 +281,7 @@ API: `GET /api/events`, `GET /api/alarms?from=&to=&operator=&mechanic=`,
 
 ```powershell
 py -3 -m unittest discover -s simulator -p "test_*.py" -v   # 11 тестов
-py -3 -m unittest web.test_server -v                        # 47 тестов
+py -3 -m unittest web.test_server -v                        # 48 тестов
 ```
 
 ---

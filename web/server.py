@@ -91,6 +91,24 @@ CREATE TABLE IF NOT EXISTS alarms (
 
 ALARM_START_LEVELS = ("WARN", "ERROR")
 
+# SQL-выражение «причина для отображения» (для «Другой причины» добавляем текст).
+CAUSE_EXPR = """
+    CASE
+      WHEN cause_code IS NOT NULL AND (cause_code % 10) = 9 THEN
+        CASE
+          WHEN cause_path IS NOT NULL AND cause_path != '' THEN
+            CASE
+              WHEN cause_text IS NOT NULL AND cause_text != ''
+                   AND instr(cause_path, cause_text) = 0
+              THEN cause_path || ':' || cause_text
+              ELSE cause_path
+            END
+          ELSE COALESCE(cause_text, 'Причина не указана')
+        END
+      ELSE COALESCE(cause_path, cause_text, 'Причина не указана')
+    END
+"""
+
 
 def now_ms():
     return int(time.time() * 1000)
@@ -437,8 +455,9 @@ class EventStore:
                 % where, params)]
         return {"operators": operators, "mechanics": mechanics}
 
-    def summary(self, date_from=None, date_to=None, operator=None, mechanic=None):
-        """Агрегированные данные по авариям за период."""
+    @staticmethod
+    def _alarm_where(date_from=None, date_to=None, operator=None, mechanic=None):
+        """WHERE-условие и параметры для таблицы alarms."""
         where = " WHERE 1=1"
         params = []
         if operator:
@@ -453,6 +472,18 @@ class EventStore:
         if date_to is not None:
             where += " AND stop_time <= ?"
             params.append(date_to)
+        return where, params
+
+    def summary(self, date_from=None, date_to=None, operator=None, mechanic=None,
+                shift_id=None):
+        """Агрегированные данные по авариям за период.
+
+        Если задан ``shift_id`` — только по этой смене.
+        """
+        where, params = self._alarm_where(date_from, date_to, operator, mechanic)
+        if shift_id is not None:
+            where += " AND shift_id = ?"
+            params.append(shift_id)
 
         shift_where = " WHERE type IN ('SHIFT_START', 'SHIFT_END')"
         shift_params = []
@@ -462,6 +493,9 @@ class EventStore:
         if mechanic:
             shift_where += " AND mechanic = ?"
             shift_params.append(mechanic)
+        if shift_id is not None:
+            shift_where += " AND shift_id = ?"
+            shift_params.append(shift_id)
         if date_from is not None:
             shift_where += " AND COALESCE(device_time, received_at) >= ?"
             shift_params.append(date_from)
@@ -479,8 +513,7 @@ class EventStore:
                        COALESCE(AVG(duration_ms), 0) AS avg_duration,
                        COALESCE(MAX(duration_ms), 0) AS max_duration,
                        COALESCE(MIN(duration_ms), 0) AS min_duration
-                FROM alarms%s
-                """ % where,
+                FROM alarms""" + where,
                 params,
             ).fetchone()
             shift_rows = con.execute(
@@ -490,38 +523,17 @@ class EventStore:
                 shift_params,
             ).fetchall()
             by_cause = con.execute(
-                """
-                SELECT CASE
-                         WHEN cause_code IS NOT NULL AND (cause_code %% 10) = 9 THEN
-                           CASE
-                             WHEN cause_path IS NOT NULL AND cause_path != '' THEN
-                               CASE
-                                 WHEN cause_text IS NOT NULL AND cause_text != ''
-                                      AND instr(cause_path, cause_text) = 0
-                                 THEN cause_path || ':' || cause_text
-                                 ELSE cause_path
-                               END
-                             ELSE COALESCE(cause_text, 'Причина не указана')
-                           END
-                         ELSE COALESCE(cause_path, cause_text, 'Причина не указана')
-                       END AS cause,
-                       COUNT(*) AS count,
-                       COALESCE(SUM(duration_ms), 0) AS duration_ms
-                FROM alarms%s
-                GROUP BY cause
-                ORDER BY count DESC, duration_ms DESC
-                """ % where,
+                "SELECT " + CAUSE_EXPR + " AS cause, COUNT(*) AS count, "
+                "COALESCE(SUM(duration_ms), 0) AS duration_ms "
+                "FROM alarms" + where +
+                " GROUP BY cause ORDER BY count DESC, duration_ms DESC",
                 params,
             ).fetchall()
             by_day = con.execute(
-                """
-                SELECT date(stop_time / 1000, 'unixepoch', 'localtime') AS day,
-                       COUNT(*) AS count,
-                       COALESCE(SUM(duration_ms), 0) AS duration_ms
-                FROM alarms%s
-                GROUP BY day
-                ORDER BY day DESC
-                """ % where,
+                "SELECT date(stop_time / 1000, 'unixepoch', 'localtime') AS day, "
+                "COUNT(*) AS count, COALESCE(SUM(duration_ms), 0) AS duration_ms "
+                "FROM alarms" + where +
+                " GROUP BY day ORDER BY day DESC",
                 params,
             ).fetchall()
 
@@ -556,6 +568,76 @@ class EventStore:
             "by_cause": [dict(r) for r in by_cause],
             "by_day": [dict(r) for r in by_day],
         }
+
+    @staticmethod
+    def _shift_start_query(date_from=None, date_to=None, operator=None,
+                           mechanic=None):
+        """Запрос последнего события начала смены в выбранном периоде."""
+        query = ("SELECT shift_id, operator, mechanic, device_time "
+                 "FROM events WHERE type = 'SHIFT_START' "
+                 "AND shift_id IS NOT NULL")
+        params = []
+        if operator:
+            query += " AND operator = ?"
+            params.append(operator)
+        if mechanic:
+            query += " AND mechanic = ?"
+            params.append(mechanic)
+        if date_from is not None:
+            query += " AND COALESCE(device_time, received_at) >= ?"
+            params.append(date_from)
+        if date_to is not None:
+            query += " AND COALESCE(device_time, received_at) <= ?"
+            params.append(date_to)
+        query += (" ORDER BY COALESCE(device_time, received_at) DESC, "
+                  "id DESC LIMIT 1")
+        return query, params
+
+    def current_shift(self, date_from=None, date_to=None, operator=None,
+                      mechanic=None):
+        """Последняя начатая смена в выбранном периоде (или None)."""
+        query, params = self._shift_start_query(
+            date_from, date_to, operator, mechanic)
+        with self._session() as con:
+            row = con.execute(query, params).fetchone()
+        if row is None or row["shift_id"] is None:
+            return None
+        return {
+            "shift_id": row["shift_id"],
+            "operator": row["operator"],
+            "mechanic": row["mechanic"],
+            "start_time": row["device_time"],
+        }
+
+    def last_shift_causes(self, date_from=None, date_to=None,
+                          operator=None, mechanic=None):
+        """Разбивка причин по последней (текущей) смене.
+
+        Смена — самое свежее событие ``SHIFT_START`` в выбранном периоде.
+        Если в этой смене ещё не было аварий — ``by_cause`` пуст, а если
+        событий о начале смены нет вовсе — ``shift`` равен None.
+        """
+        shift = self.current_shift(date_from, date_to, operator, mechanic)
+        if shift is None:
+            return {"shift": None, "by_cause": []}
+        where, params = self._alarm_where(date_from, date_to, operator, mechanic)
+        shift_id = shift["shift_id"]
+        with self._session() as con:
+            causes = con.execute(
+                "SELECT " + CAUSE_EXPR + " AS cause, COUNT(*) AS count, "
+                "COALESCE(SUM(duration_ms), 0) AS duration_ms "
+                "FROM alarms" + where +
+                " AND shift_id = ? GROUP BY cause "
+                "ORDER BY count DESC, duration_ms DESC",
+                params + [shift_id],
+            ).fetchall()
+            first = con.execute(
+                "SELECT MIN(stop_time) AS first_stop FROM alarms" + where
+                + " AND shift_id = ?", params + [shift_id],
+            ).fetchone()
+        if shift["start_time"] is None and first is not None:
+            shift["start_time"] = first["first_stop"]
+        return {"shift": shift, "by_cause": [dict(r) for r in causes]}
 
     def stats(self):
         with self._session() as con:
@@ -708,8 +790,6 @@ class _Handler(BaseHTTPRequestHandler):
                 "/login", SESSION_COOKIE + "=; Path=/; Max-Age=0; HttpOnly")
         if path == "/api/health":
             return self._json({"status": "ok", "time": now_ms()})
-        if self._require_auth() is None:
-            return
         if path == "/api/me":
             return self._json(self._user())
         if path == "/" or path == "/index.html":
@@ -745,8 +825,16 @@ class _Handler(BaseHTTPRequestHandler):
         if path in ("/download/app.apk", "/app.apk"):
             return self._download_apk()
         if path == "/api/summary":
-            return self._json(
-                self.store.summary(date_from, date_to, operator, mechanic))
+            shift_id = None
+            if params.get("shift") == "current":
+                shift = self.store.current_shift(
+                    date_from, date_to, operator, mechanic)
+                shift_id = shift["shift_id"] if shift else -1
+            return self._json(self.store.summary(
+                date_from, date_to, operator, mechanic, shift_id=shift_id))
+        if path == "/api/last-shift-causes":
+            return self._json(self.store.last_shift_causes(
+                date_from, date_to, operator, mechanic))
         if path == "/api/export.xlsx":
             return self._export_xlsx(date_from, date_to, operator, mechanic)
         if path == "/api/stats":
@@ -1117,7 +1205,7 @@ def create_server(host, port, db_path, apk_path=None, require_auth=True):
 LOGIN_PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Вход — Line Stop Monitor</title>
+<title>Вход — Finnah</title>
 <style>
   body { margin:0; min-height:100vh; display:flex; align-items:center;
          justify-content:center; background:#0f141a; color:#e6edf3;
@@ -1136,7 +1224,7 @@ LOGIN_PAGE = """<!doctype html>
   .err { color:#ff6b6b; font-size:13px; margin:12px 0 0; }
 </style></head><body>
 <form method="post" action="/login">
-  <h1>Line Stop Monitor</h1>
+  <h1>Finnah</h1>
   <div class="sub">Вход в панель мониторинга</div>
   <label>Логин</label>
   <input name="username" autocomplete="username" autofocus>
@@ -1153,7 +1241,7 @@ DASHBOARD = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Line Stop Monitor — мониторинг</title>
+<title>Finnah — мониторинг</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -1203,7 +1291,8 @@ DASHBOARD = """<!doctype html>
   .card.alarm { border-color: #7f1d1d; }
   .card.alarm .value { color: #ff5c5c; }
   h2 { font-size: 15px; margin: 28px 0 12px; color: #cfd8e3; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+           margin-top: 20px; }
   @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
   .acc { background: #161d26; border: 1px solid #232c38; border-radius: 12px;
          padding: 0 16px; align-self: start; }
@@ -1232,11 +1321,11 @@ DASHBOARD = """<!doctype html>
 </head>
 <body>
 <header>
-  <h1>Line Stop Monitor — мониторинг аварий</h1>
+  <h1>Finnah — мониторинг аварий</h1>
   <div class="live"><span class="dot"></span><span id="updated">загрузка…</span></div>
   <span class="who" id="who"></span>
   <a class="btn excel" href="/download/app.apk">Скачать APK</a>
-  <a class="btn" href="/logout">Выйти</a>
+  <a class="btn" id="authLink" href="/login">Войти</a>
 </header>
 <main>
   <div class="tabs">
@@ -1268,7 +1357,9 @@ DASHBOARD = """<!doctype html>
 
     <div class="grid2">
       <details class="acc">
-        <summary>По причинам</summary>
+        <summary>По причинам
+          <span class="muted" id="byCauseShift"
+                style="font-size:12px;font-weight:400"></span></summary>
         <div id="byCause"></div>
       </details>
       <details class="acc">
@@ -1346,9 +1437,18 @@ let isAdmin = false;
 async function loadMe() {
   try {
     const me = await j('/api/me');
-    document.getElementById('who').textContent = 'Пользователь: ' + me.user;
-    isAdmin = (me.role === 'admin');
-    if (isAdmin) document.body.classList.add('is-admin');
+    const link = document.getElementById('authLink');
+    if (me && me.user) {
+      document.getElementById('who').textContent = 'Пользователь: ' + me.user;
+      isAdmin = (me.role === 'admin');
+      if (isAdmin) document.body.classList.add('is-admin');
+      link.textContent = 'Выйти';
+      link.href = '/logout';
+    } else {
+      document.getElementById('who').textContent = 'Просмотр без входа';
+      link.textContent = 'Войти';
+      link.href = '/login';
+    }
   } catch (e) { /* ignore */ }
 }
 
@@ -1415,17 +1515,25 @@ function renderCards(sum) {
   document.getElementById('cards').innerHTML = `
     <div class="card alarm"><div class="value">${sum.open}</div>
       <div class="label">Активные аварии</div></div>
-    <div class="card"><div class="value">${sum.total}</div>
-      <div class="label">Всего случаев</div></div>
     <div class="card"><div class="value">${fmtDur(sum.avg_duration_ms)}</div>
       <div class="label">Средняя длительность</div></div>
+    <div class="card"><div class="value">${sum.total}</div>
+      <div class="label">Всего случаев</div></div>
     <div class="card"><div class="value">${fmtDur(sum.total_duration_ms)}</div>
       <div class="label">Суммарная длительность</div></div>
     <div class="card"><div class="value">${fmtDur(sum.work_duration_ms)}</div>
       <div class="label">Время в работе (за смены)</div></div>`;
 }
 
-function renderByCause(rows) {
+function renderByCause(rows, shift) {
+  const label = document.getElementById('byCauseShift');
+  if (shift && shift.shift_id != null) {
+    const who = [shift.operator, shift.mechanic].filter(Boolean).join(' · ');
+    label.textContent = '— последняя смена' + (who ? ' (' + who + ')' : '') +
+      (shift.start_time ? ', с ' + fmtTime(shift.start_time) : '');
+  } else {
+    label.textContent = '— последняя смена: нет данных';
+  }
   const el = document.getElementById('byCause');
   if (!rows.length) { el.innerHTML = '<div id="empty">Нет данных</div>'; return; }
   el.innerHTML = `<table><thead><tr>
@@ -1493,13 +1601,21 @@ function renderAlarms(alarms) {
 async function refresh() {
   try {
     const qs = queryString();
+    // карточки: без фильтров — текущая смена, с фильтрами — отфильтрованный период
+    const filtered = state.from != null || state.to != null ||
+      !!state.operator || !!state.mechanic;
     document.getElementById('export').href = '/api/export.xlsx' + qs;
     document.getElementById('exportShifts').href = '/api/export-shifts.xlsx' + qs;
-    const [sum, alarms, shifts] = await Promise.all([
-      j('/api/summary' + qs), j('/api/alarms' + qs), j('/api/shift-events' + qs)]);
+    const calls = [
+      j('/api/summary' + qs), j('/api/alarms' + qs),
+      j('/api/shift-events' + qs), j('/api/last-shift-causes' + qs)];
+    if (!filtered) calls.push(j('/api/summary?shift=current'));
+    const [sumPeriod, alarms, shifts, lastCauses, sumShift] =
+      await Promise.all(calls);
+    const sum = filtered ? sumPeriod : sumShift;
     renderCards(sum);
-    renderByCause(sum.by_cause);
-    renderByDay(sum.by_day);
+    renderByCause(lastCauses.by_cause, lastCauses.shift);
+    renderByDay(sumPeriod.by_day);
     renderAlarms(alarms.alarms);
     renderShiftEvents(shifts.events);
     document.getElementById('updated').textContent =

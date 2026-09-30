@@ -93,7 +93,7 @@ class WebServerTest(unittest.TestCase):
         status, headers, body = self.request("GET", "/")
         self.assertEqual(200, status)
         self.assertIn("text/html", headers["Content-Type"])
-        self.assertIn("Line Stop Monitor", body.decode("utf-8"))
+        self.assertIn("Finnah", body.decode("utf-8"))
 
     def test_03_empty_stats(self):
         data = self.get_json("/api/stats")
@@ -490,6 +490,99 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual(60_000, data["total_duration_ms"])
         self.assertEqual(240_000, data["work_duration_ms"])
 
+    def test_40_last_shift_causes(self):
+        t = 1_000_002_000_000
+        self.post_json("/api/events", self.event(
+            deviceId="ls", alarmId=None, shiftId=1, type="SHIFT_START",
+            category="SHIFT", time=t, operator="Демо1", mechanic="Мех1",
+            message="start1"))
+        self.post_json("/api/events", self.event(
+            deviceId="ls", alarmId=601, shiftId=1, type="ALARM_START",
+            time=t, stopTime=t, operator="Демо1", mechanic="Мех1"))
+        self.post_json("/api/events", self.event(
+            deviceId="ls", alarmId=601, shiftId=1, type="CAUSE_SELECTED",
+            time=t + 1_000, stopTime=t, startTime=t + 1_000, durationMs=1_000,
+            causeCode=3, causePath="Причина А", operator="Демо1", mechanic="Мех1"))
+        t2 = t + 100_000
+        self.post_json("/api/events", self.event(
+            deviceId="ls", alarmId=None, shiftId=2, type="SHIFT_START",
+            category="SHIFT", time=t2, operator="Демо2", mechanic="Мех2",
+            message="start2"))
+        for aid, cause in [(602, "Причина Б"), (603, "Причина В")]:
+            self.post_json("/api/events", self.event(
+                deviceId="ls", alarmId=aid, shiftId=2, type="ALARM_START",
+                time=t2, stopTime=t2, operator="Демо2", mechanic="Мех2"))
+            self.post_json("/api/events", self.event(
+                deviceId="ls", alarmId=aid, shiftId=2, type="CAUSE_SELECTED",
+                time=t2 + 1_000, stopTime=t2, startTime=t2 + 1_000,
+                durationMs=1_000, causeCode=5, causePath=cause,
+                operator="Демо2", mechanic="Мех2"))
+            t2 += 10_000
+
+        data = self.get_json(
+            "/api/last-shift-causes?from=%d&to=%d" % (t - 1, t2 + 10_000))
+        self.assertEqual(2, data["shift"]["shift_id"])
+        self.assertEqual("Демо2", data["shift"]["operator"])
+        self.assertEqual({"Причина Б", "Причина В"},
+                         {c["cause"] for c in data["by_cause"]})
+
+        data1 = self.get_json(
+            "/api/last-shift-causes?from=%d&to=%d" % (t - 1, t + 5_000))
+        self.assertEqual(1, data1["shift"]["shift_id"])
+        self.assertEqual(["Причина А"], [c["cause"] for c in data1["by_cause"]])
+
+    def test_41_last_shift_empty_when_no_alarms_yet(self):
+        t = 1_000_004_000_000
+        self.post_json("/api/events", self.event(
+            deviceId="empty", alarmId=None, shiftId=99, type="SHIFT_START",
+            category="SHIFT", time=t, operator="Новый", message="start"))
+        data = self.get_json(
+            "/api/last-shift-causes?from=%d&to=%d" % (t - 1, t + 1_000))
+        self.assertEqual(99, data["shift"]["shift_id"])
+        self.assertEqual("Новый", data["shift"]["operator"])
+        self.assertEqual([], data["by_cause"])
+
+    def test_42_last_shift_none_without_shift_events(self):
+        data = self.get_json("/api/last-shift-causes?from=1&to=2")
+        self.assertIsNone(data["shift"])
+        self.assertEqual([], data["by_cause"])
+
+    def test_43_summary_current_shift(self):
+        from urllib.parse import quote
+        t = 1_000_003_000_000
+        self.post_json("/api/events", self.event(
+            deviceId="cs", alarmId=None, shiftId=11, type="SHIFT_START",
+            category="SHIFT", time=t, operator="Оператор1", mechanic="Мех1",
+            message="start1"))
+        self.post_json("/api/events", self.event(
+            deviceId="cs", alarmId=701, shiftId=11, type="ALARM_START",
+            time=t, stopTime=t, operator="Оператор1", mechanic="Мех1"))
+        self.post_json("/api/events", self.event(
+            deviceId="cs", alarmId=701, shiftId=11, type="ALARM_END",
+            time=t + 1_000, stopTime=t, startTime=t + 1_000, durationMs=1_000,
+            operator="Оператор1", mechanic="Мех1"))
+        t2 = t + 100_000
+        self.post_json("/api/events", self.event(
+            deviceId="cs", alarmId=None, shiftId=12, type="SHIFT_START",
+            category="SHIFT", time=t2, operator="Оператор2", mechanic="Мех2",
+            message="start2"))
+        self.post_json("/api/events", self.event(
+            deviceId="cs", alarmId=702, shiftId=12, type="ALARM_START",
+            time=t2, stopTime=t2, operator="Оператор2", mechanic="Мех2"))
+        self.post_json("/api/events", self.event(
+            deviceId="cs", alarmId=702, shiftId=12, type="ALARM_END",
+            time=t2 + 5_000, stopTime=t2, startTime=t2 + 5_000, durationMs=5_000,
+            operator="Оператор2", mechanic="Мех2"))
+
+        q = "?from=%d&to=%d" % (t2 - 50_000, t2 + 50_000)
+        data = self.get_json("/api/summary" + q + "&shift=current")
+        self.assertEqual(1, data["total"])
+        self.assertEqual(5_000, data["total_duration_ms"])
+
+        filt = self.get_json("/api/summary?operator=" + quote("Оператор1"))
+        self.assertEqual(1, filt["total"])
+        self.assertEqual(1_000, filt["total_duration_ms"])
+
 
 class ApkDownloadTest(unittest.TestCase):
 
@@ -604,14 +697,23 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertIn("Войти", body.decode("utf-8"))
 
-    def test_dashboard_requires_auth(self):
-        status, hdrs, _ = self.request("GET", "/")
-        self.assertEqual(303, status)
-        self.assertEqual("/login", hdrs.get("Location"))
+    def test_dashboard_is_public(self):
+        status, _, body = self.request("GET", "/")
+        self.assertEqual(200, status)
+        self.assertIn("Finnah", body.decode("utf-8"))
 
-    def test_api_requires_auth(self):
-        status, _, _ = self.request("GET", "/api/stats")
-        self.assertEqual(401, status)
+    def test_api_read_is_public(self):
+        status, _, body = self.request("GET", "/api/stats")
+        self.assertEqual(200, status)
+        self.assertEqual(0, json.loads(body.decode("utf-8"))["events"])
+        status, _, body = self.request("GET", "/api/alarms")
+        self.assertEqual(200, status)
+        self.assertEqual([], json.loads(body.decode("utf-8"))["alarms"])
+
+    def test_anonymous_me_is_null(self):
+        status, _, body = self.request("GET", "/api/me")
+        self.assertEqual(200, status)
+        self.assertIsNone(json.loads(body.decode("utf-8")))
 
     def test_ingest_is_open(self):
         status, _, body = self.request("POST", "/api/events", json_body=self.event())
@@ -659,8 +761,9 @@ class AuthTest(unittest.TestCase):
     def test_logout_clears_session(self):
         self.login()
         self.request("GET", "/logout")
-        status, hdrs, _ = self.request("GET", "/")
-        self.assertEqual(303, status)
+        status, _, body = self.request("GET", "/api/me")
+        self.assertEqual(200, status)
+        self.assertIsNone(json.loads(body.decode("utf-8")))
 
 
 class StorePersistenceTest(unittest.TestCase):

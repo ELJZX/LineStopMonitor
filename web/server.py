@@ -415,6 +415,47 @@ class EventStore:
             return None
         return max(active.values(), key=lambda s: s["start"] or 0)
 
+    def shifts_in_range(self, date_from=None, date_to=None,
+                        operator=None, mechanic=None):
+        """Смены (SHIFT_START/SHIFT_END), пересекающиеся с периодом."""
+        query = ("SELECT device_id, shift_id, type, operator, mechanic, "
+                 "COALESCE(device_time, received_at) AS t FROM events "
+                 "WHERE type IN ('SHIFT_START', 'SHIFT_END')")
+        params = []
+        if operator:
+            query += " AND operator = ?"
+            params.append(operator)
+        if mechanic:
+            query += " AND mechanic = ?"
+            params.append(mechanic)
+        query += " ORDER BY t, id"
+        with self._session() as con:
+            rows = con.execute(query, params).fetchall()
+        starts = {}
+        ends = {}
+        for r in rows:
+            key = (r["device_id"], r["shift_id"])
+            if r["type"] == "SHIFT_START":
+                starts[key] = {
+                    "operator": r["operator"], "mechanic": r["mechanic"],
+                    "start": r["t"],
+                }
+            else:
+                ends[key] = r["t"]
+        result = []
+        for key, s in starts.items():
+            e = ends.get(key)
+            if date_from is not None and e is not None and e < date_from:
+                continue
+            if date_to is not None and s["start"] is not None and s["start"] > date_to:
+                continue
+            result.append({
+                "operator": s["operator"], "mechanic": s["mechanic"],
+                "start": s["start"], "end": e,
+            })
+        result.sort(key=lambda x: x["start"] or 0)
+        return result
+
     def alarms(self, open_only=False, device_id=None, limit=500,
                date_from=None, date_to=None, operator=None, mechanic=None,
                shift_id=None):
@@ -768,6 +809,9 @@ class _Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/current-shift":
             return self._json({"shift": self.store.current_shift()})
+        if path == "/api/shifts":
+            return self._json({"shifts": self.store.shifts_in_range(
+                date_from, date_to, operator, mechanic)})
         if path == "/api/filters":
             return self._json(self.store.filters(date_from, date_to))
         if path == "/api/shift-events":
@@ -1302,8 +1346,8 @@ DASHBOARD = """<!doctype html>
   </div>
 
   <div class="toolbar">
-    <label>С <input type="date" id="from"></label>
-    <label>По <input type="date" id="to"></label>
+    <label>С <input type="datetime-local" id="from"></label>
+    <label>По <input type="datetime-local" id="to"></label>
     <label>Оператор
       <select id="operator"><option value="">Все</option></select></label>
     <label>Механик
@@ -1329,7 +1373,7 @@ DASHBOARD = """<!doctype html>
       </details>
     </div>
 
-    <h2>Текущая смена</h2>
+    <h2 id="shiftHeading">Текущая смена</h2>
     <div id="shiftInfo"></div>
 
     <h2 id="chartHeading">График работы линии за смену</h2>
@@ -1492,8 +1536,8 @@ async function loadFilters() {
 function applyFilter() {
   const from = document.getElementById('from').value;
   const to = document.getElementById('to').value;
-  state.from = from ? new Date(from + 'T00:00:00').getTime() : null;
-  state.to = to ? new Date(to + 'T23:59:59.999').getTime() : null;
+  state.from = from ? new Date(from).getTime() : null;
+  state.to = to ? new Date(to).getTime() : null;
   state.operator = document.getElementById('operator').value;
   state.mechanic = document.getElementById('mechanic').value;
   loadFilters();
@@ -1625,13 +1669,30 @@ async function refresh() {
     renderAlarmTable('currentAlarms', viewAlarms, 'Аварий нет');
     renderTimeline(viewAlarms, computeChartWindow(shift, viewAlarms));
 
-    if (shift) {
-      document.getElementById('shiftInfo').innerHTML =
-        'Оператор: <b>' + esc(shift.operator || '—') + '</b> · Механик: <b>' +
-        esc(shift.mechanic || '—') + '</b> · с ' + fmtTime(shift.start);
+    const shHead = document.getElementById('shiftHeading');
+    const shInfo = document.getElementById('shiftInfo');
+    if (filterActive()) {
+      shHead.textContent = 'Смены за период';
+      const sh = await j('/api/shifts' + qs);
+      if (sh.shifts.length) {
+        shInfo.innerHTML = sh.shifts.map(s =>
+          esc(s.operator || '—') +
+          (s.mechanic ? ' / ' + esc(s.mechanic) : '') +
+          ' с ' + fmtTime(s.start) +
+          (s.end ? ' по ' + fmtTime(s.end) : ' (идёт)')
+        ).join('<br>');
+      } else {
+        shInfo.innerHTML = '<span class="muted">Смен за период нет</span>';
+      }
     } else {
-      document.getElementById('shiftInfo').innerHTML =
-        '<span class="muted">Смена не начата</span>';
+      shHead.textContent = 'Текущая смена';
+      if (shift) {
+        shInfo.innerHTML =
+          'Оператор: <b>' + esc(shift.operator || '—') + '</b> · Механик: <b>' +
+          esc(shift.mechanic || '—') + '</b> · с ' + fmtTime(shift.start);
+      } else {
+        shInfo.innerHTML = '<span class="muted">Смена не начата</span>';
+      }
     }
     document.getElementById('updated').textContent =
       'обновлено ' + new Date().toLocaleTimeString('ru-RU');

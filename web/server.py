@@ -1592,33 +1592,47 @@ function renderByDay(rows) {
 }
 
 /* Одна зарегистрированная авария = одна строка. Открытые — сверху. */
-function renderAlarmTable(elId, alarms, emptyText) {
+const alarmTableSig = {};
+let highlightKey = null;
+let highlightUntil = 0;
+let highlightTimer = null;
+
+function applyHighlight(elId) {
+  if (!highlightKey || Date.now() > highlightUntil) return;
   const el = document.getElementById(elId);
-  if (!alarms.length) {
-    el.innerHTML = '<div id="empty">' + emptyText + '</div>';
-    return;
-  }
-  const sorted = alarms.slice().sort((a, b) =>
-    (a.closed - b.closed) || (b.stop_time - a.stop_time));
-  el.innerHTML = `<table><thead><tr>
+  const tr = el && el.querySelector('tr[data-key="' + highlightKey + '"]');
+  if (tr) tr.classList.add('row-hit');
+}
+
+function renderAlarmTable(elId, alarms, emptyText) {
+  const sig = emptyText + '|' + JSON.stringify(alarms);
+  const el = document.getElementById(elId);
+  if (alarmTableSig[elId] !== sig) {
+    alarmTableSig[elId] = sig;
+    if (!alarms.length) {
+      el.innerHTML = '<div id="empty">' + emptyText + '</div>';
+    } else {
+      const sorted = alarms.slice().sort((a, b) =>
+        (a.closed - b.closed) || (b.stop_time - a.stop_time));
+      el.innerHTML = `<table><thead><tr>
       <th>№</th><th>Смена</th><th>Оператор</th><th>Механик</th><th>Начало</th>
       <th>Конец</th><th>Длительность</th><th>Причина</th><th>Статус</th>
       <th></th></tr></thead><tbody>` +
-    sorted.map(a => {
-      let cause;
-      if (a.cause_code != null && a.cause_code % 10 === 9) {
-        if (a.cause_path) {
-          cause = (a.cause_text && !a.cause_path.includes(a.cause_text))
-            ? (a.cause_path + ':' + a.cause_text) : a.cause_path;
-        } else {
-          cause = a.cause_text || 'Другая причина';
-        }
-      } else {
-        cause = a.cause_path || a.cause_text || (a.closed ? 'Без причины' : '—');
-      }
-      const end = a.start_time ? fmtTime(a.start_time) : (a.closed ? '—' : 'идёт');
-      const dur = a.closed ? fmtDur(a.duration_ms) : 'идёт';
-      return `<tr class="${a.closed ? '' : 'open'}" data-key="${esc(a.device_id)}|${a.alarm_id}">
+        sorted.map(a => {
+          let cause;
+          if (a.cause_code != null && a.cause_code % 10 === 9) {
+            if (a.cause_path) {
+              cause = (a.cause_text && !a.cause_path.includes(a.cause_text))
+                ? (a.cause_path + ':' + a.cause_text) : a.cause_path;
+            } else {
+              cause = a.cause_text || 'Другая причина';
+            }
+          } else {
+            cause = a.cause_path || a.cause_text || (a.closed ? 'Без причины' : '—');
+          }
+          const end = a.start_time ? fmtTime(a.start_time) : (a.closed ? '—' : 'идёт');
+          const dur = a.closed ? fmtDur(a.duration_ms) : 'идёт';
+          return `<tr class="${a.closed ? '' : 'open'}" data-key="${esc(a.device_id)}|${a.alarm_id}">
         <td>#${esc(a.alarm_id)}</td>
         <td class="muted">${a.shift_id == null ? '—' : esc(a.shift_id)}</td>
         <td>${esc(a.operator || '—')}</td>
@@ -1632,7 +1646,10 @@ function renderAlarmTable(elId, alarms, emptyText) {
         <td><button class="btn del"
             onclick="deleteAlarm('${esc(a.device_id)}',${a.alarm_id})">Удалить</button></td>
       </tr>`;
-    }).join('') + '</tbody></table>';
+        }).join('') + '</tbody></table>';
+    }
+  }
+  applyHighlight(elId);
 }
 
 async function refresh() {
@@ -1703,11 +1720,17 @@ async function refresh() {
 
 /* Прокручивает таблицу к аварии и подсвечивает её. */
 function focusAlarm(deviceId, alarmId) {
-  const tr = document.querySelector('tr[data-key="' + deviceId + '|' + alarmId + '"]');
+  highlightKey = deviceId + '|' + alarmId;
+  highlightUntil = Date.now() + 6000;
+  const tr = document.querySelector('tr[data-key="' + highlightKey + '"]');
   if (!tr) return;
   tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
   tr.classList.add('row-hit');
-  setTimeout(() => tr.classList.remove('row-hit'), 6000);
+  clearTimeout(highlightTimer);
+  highlightTimer = setTimeout(() => {
+    highlightKey = null;
+    document.querySelectorAll('tr.row-hit').forEach(t => t.classList.remove('row-hit'));
+  }, 6000);
 }
 
 /* График: X — 07:00–21:00, Y: +1 — работа (зелёный), -1 — авария (красный),

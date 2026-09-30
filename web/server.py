@@ -1249,7 +1249,15 @@ DASHBOARD = """<!doctype html>
   .acc[open] > summary::after { content: '▴'; }
   .acc > div { padding-bottom: 14px; }
   .chart-card { background: #161d26; border: 1px solid #232c38;
-                border-radius: 12px; padding: 12px 16px 8px; }
+                border-radius: 12px; padding: 12px 16px 8px;
+                user-select: none; }
+  .chart-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+                margin-bottom: 6px; }
+  .chart-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .chart-tools .hint { font-size: 12px; color: #8b98a5; }
+  .chart-tools .btn { padding: 4px 12px; }
+  #shiftChart { cursor: grab; }
+  #shiftChart.dragging { cursor: grabbing; }
   .chart-legend { display: flex; gap: 18px; font-size: 13px; color: #8b98a5;
                   margin-bottom: 6px; }
   .chart-legend .lg::before { content: ''; display: inline-block; width: 10px;
@@ -1326,9 +1334,17 @@ DASHBOARD = """<!doctype html>
 
     <h2 id="chartHeading">График работы линии за смену</h2>
     <div class="chart-card">
-      <div class="chart-legend">
-        <span class="lg work">В работе (+1)</span>
-        <span class="lg alarm">Авария (-1)</span>
+      <div class="chart-head">
+        <div class="chart-legend">
+          <span class="lg work">В работе (+1)</span>
+          <span class="lg alarm">Авария (-1)</span>
+        </div>
+        <div class="chart-tools">
+          <span class="hint">колесо — масштаб, перетаскивание — сдвиг</span>
+          <button class="btn" onclick="chartZoom(1.5)">+</button>
+          <button class="btn" onclick="chartZoom(0.667)">&minus;</button>
+          <button class="btn" onclick="chartReset()">Сброс</button>
+        </div>
       </div>
       <svg id="shiftChart" height="260"></svg>
       <div id="chartEmpty" class="muted" style="display:none">
@@ -1633,11 +1649,35 @@ function focusAlarm(deviceId, alarmId) {
 }
 
 /* График: X — 07:00–21:00, Y: +1 — работа (зелёный), -1 — авария (красный),
-   ещё не наступившее время — 0. */
+   ещё не наступившее время — 0. Поддерживает масштаб и сдвиг. */
+let chartAlarms = [];
+let chartDay = null;
+let chartView = null;   // {s,e} в мс, null — весь диапазон
+let chartGeom = null;
+
+function dayWindow(dayMs) {
+  const d0 = new Date(dayMs);
+  d0.setHours(0, 0, 0, 0);
+  return { start: d0.getTime() + 7 * 3600 * 1000,
+           end: d0.getTime() + 21 * 3600 * 1000 };
+}
+
+function tickStep(span) {
+  const steps = [5, 10, 15, 30, 60, 120, 180, 360].map(m => m * 60000);
+  for (const s of steps) if (span / s <= 10) return s;
+  return 360 * 60000;
+}
+
 function renderTimeline(alarms, dayMs) {
+  chartAlarms = alarms || [];
+  if (dayMs !== chartDay) { chartDay = dayMs; chartView = null; }
+  drawChart();
+}
+
+function drawChart() {
   const svg = document.getElementById('shiftChart');
   const empty = document.getElementById('chartEmpty');
-  if (dayMs == null) {
+  if (chartDay == null) {
     svg.style.display = 'none';
     empty.style.display = '';
     return;
@@ -1645,14 +1685,18 @@ function renderTimeline(alarms, dayMs) {
   empty.style.display = 'none';
   svg.style.display = '';
 
-  const d0 = new Date(dayMs);
-  d0.setHours(0, 0, 0, 0);
-  const winStart = d0.getTime() + 7 * 3600 * 1000;
-  const winEnd = d0.getTime() + 21 * 3600 * 1000;
-  const span = winEnd - winStart;
+  const win = dayWindow(chartDay);
+  const winStart = win.start, winEnd = win.end;
   const nowMs = Math.min(Date.now(), winEnd);
 
-  const ints = (alarms || [])
+  let viewS = chartView ? chartView.s : winStart;
+  let viewE = chartView ? chartView.e : winEnd;
+  viewS = Math.max(winStart, Math.min(viewS, winEnd));
+  viewE = Math.max(winStart, Math.min(viewE, winEnd));
+  if (viewE - viewS < 5 * 60000) viewE = viewS + 5 * 60000;
+  const span = viewE - viewS;
+
+  const ints = chartAlarms
     .map(a => ({ s: a.stop_time, e: a.start_time || nowMs,
                  dev: a.device_id, id: a.alarm_id }))
     .filter(x => x.s != null && x.e > x.s)
@@ -1675,45 +1719,103 @@ function renderTimeline(alarms, dayMs) {
   const mid = padT + (H - padT - padB) / 2;
   const half = (H - padT - padB) / 2 - 8;
   const plotW = W - padL - padR;
-  const x = t => padL + (t - winStart) / span * plotW;
+  const x = t => padL + (t - viewS) / span * plotW;
   const yv = v => mid - v * half;
   const valOf = g => g.future ? 0 : (g.work ? 1 : -1);
   const colorOf = g => g.future ? '#8b98a5' : (g.work ? '#2e7d32' : '#c62828');
+  chartGeom = { padL, plotW, viewS, viewE, winStart, winEnd };
 
   const p = [];
+  p.push(`<defs><clipPath id="plotClip"><rect x="${padL}" y="${padT}" width="${plotW}" height="${H - padT - padB}"/></clipPath></defs>`);
   p.push(`<line x1="${padL}" y1="${mid.toFixed(1)}" x2="${W - padR}" y2="${mid.toFixed(1)}" stroke="#2c3745"/>`);
   for (const v of [1, 0, -1]) {
     const yy = yv(v);
     p.push(`<text x="${padL - 8}" y="${(yy + 4).toFixed(1)}" fill="#8b98a5" font-size="11" text-anchor="end">${v > 0 ? '+' : ''}${v}</text>`);
   }
-  for (let hh = 7; hh <= 21; hh += 2) {
-    const t = d0.getTime() + hh * 3600 * 1000;
-    p.push(`<text x="${x(t).toFixed(1)}" y="${H - 8}" fill="#8b98a5" font-size="11" text-anchor="middle">${String(hh).padStart(2, '0')}:00</text>`);
+  const step = tickStep(span);
+  for (let t = Math.ceil(viewS / step) * step; t <= viewE; t += step) {
+    p.push(`<text x="${x(t).toFixed(1)}" y="${H - 8}" fill="#8b98a5" font-size="11" text-anchor="middle">${fmtClock(t)}</text>`);
   }
 
+  const body = [];
   segs.forEach((g, i) => {
     const y = yv(valOf(g)).toFixed(1);
     const x0 = x(g.s).toFixed(1), x1 = x(g.e).toFixed(1);
     if (g.future) {
-      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="1.4" stroke-dasharray="4 3"/>`);
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="1.4" stroke-dasharray="4 3"/>`);
     } else if (g.work) {
-      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.2"/>`);
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.2"/>`);
     } else {
       const tip = 'Авария ' + fmtClock(g.s) + '–' + fmtClock(g.e) +
         ' — нажмите, чтобы показать в таблице';
-      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="transparent" stroke-width="16" style="cursor:pointer" onclick="focusAlarm('${g.dev}','${g.id}')"><title>${tip}</title></line>`);
-      p.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.6" pointer-events="none"/>`);
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="transparent" stroke-width="16" style="cursor:pointer" onclick="focusAlarm('${g.dev}','${g.id}')"><title>${tip}</title></line>`);
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.6" pointer-events="none"/>`);
     }
     if (i > 0) {
       const yA = yv(valOf(segs[i - 1])).toFixed(1);
-      p.push(`<line x1="${x0}" y1="${yA}" x2="${x0}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.2"/>`);
+      body.push(`<line x1="${x0}" y1="${yA}" x2="${x0}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.2"/>`);
     }
   });
+  p.push(`<g clip-path="url(#plotClip)">${body.join('')}</g>`);
 
   svg.setAttribute('width', W);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.innerHTML = p.join('');
 }
+
+function setChartView(ns, ne) {
+  if (!chartGeom) return;
+  const g = chartGeom;
+  if (ne - ns < 5 * 60000) { const c = (ns + ne) / 2; ns = c - 2.5 * 60000; ne = c + 2.5 * 60000; }
+  if (ns < g.winStart) { ne += g.winStart - ns; ns = g.winStart; }
+  if (ne > g.winEnd) { ns -= ne - g.winEnd; ne = g.winEnd; }
+  ns = Math.max(g.winStart, ns); ne = Math.min(g.winEnd, ne);
+  chartView = (ns <= g.winStart && ne >= g.winEnd) ? null : { s: ns, e: ne };
+  drawChart();
+}
+
+function chartZoomAt(clientX, factor) {
+  if (!chartGeom) return;
+  const g = chartGeom;
+  const rect = document.getElementById('shiftChart').getBoundingClientRect();
+  const t = g.viewS + (clientX - rect.left - g.padL) / g.plotW * (g.viewE - g.viewS);
+  setChartView(t - (t - g.viewS) / factor, t + (g.viewE - t) / factor);
+}
+
+function chartZoom(factor) {
+  if (!chartGeom) return;
+  const g = chartGeom;
+  const t = (g.viewS + g.viewE) / 2;
+  setChartView(t - (t - g.viewS) / factor, t + (g.viewE - t) / factor);
+}
+
+function chartReset() { chartView = null; drawChart(); }
+
+let chartDragging = false, chartDragX = 0, chartDragView = null;
+function chartDragStart(clientX) {
+  if (!chartGeom) return;
+  chartDragging = true; chartDragX = clientX;
+  chartDragView = { s: chartGeom.viewS, e: chartGeom.viewE };
+  document.getElementById('shiftChart').classList.add('dragging');
+}
+function chartDragMove(clientX) {
+  if (!chartDragging || !chartGeom) return;
+  const dt = -(clientX - chartDragX) / chartGeom.plotW * (chartDragView.e - chartDragView.s);
+  setChartView(chartDragView.s + dt, chartDragView.e + dt);
+}
+function chartDragEnd() {
+  chartDragging = false;
+  document.getElementById('shiftChart').classList.remove('dragging');
+}
+
+const chartSvg = document.getElementById('shiftChart');
+chartSvg.addEventListener('wheel', e => {
+  e.preventDefault();
+  chartZoomAt(e.clientX, e.deltaY < 0 ? 1.25 : 0.8);
+}, { passive: false });
+chartSvg.addEventListener('mousedown', e => { e.preventDefault(); chartDragStart(e.clientX); });
+window.addEventListener('mousemove', e => chartDragMove(e.clientX));
+window.addEventListener('mouseup', chartDragEnd);
 
 function renderShiftEvents(rows) {
   const el = document.getElementById('shiftLog');

@@ -956,7 +956,7 @@ class _Handler(BaseHTTPRequestHandler):
             ["Всего аварий", summary["total"]],
             ["Открытых", summary["open"]],
             ["Закрытых", summary["closed"]],
-            ["Суммарная длительность", ms_to_text_short(summary["total_duration_ms"])],
+            ["Суммарная длительность аварии", ms_to_text_short(summary["total_duration_ms"])],
             ["Средняя длительность", ms_to_text_short(summary["avg_duration_ms"])],
             ["Максимальная длительность", ms_to_text_short(summary["max_duration_ms"])],
         ]
@@ -1662,7 +1662,7 @@ function renderCards(sum) {
     <div class="card"><div class="value">${sum.total}</div>
       <div class="label">Всего случаев</div></div>
     <div class="card"><div class="value">${fmtDur(sum.total_duration_ms)}</div>
-      <div class="label">Суммарная длительность</div></div>
+      <div class="label">Суммарная длительность аварии</div></div>
     <div class="card"><div class="value">${fmtDur(sum.work_duration_ms)}</div>
       <div class="label">Время в работе (за смены)</div></div>`;
 }
@@ -1858,20 +1858,23 @@ let chartView = null;    // {s,e} видимый диапазон, null — ве
 let chartGeom = null;
 
 function computeChartWindow(shift, alarms) {
-  let startMs = null, endMs = null;
-  if (state.from != null) startMs = state.from;
-  if (state.to != null) endMs = state.to;
-  if (startMs == null) {
-    if (shift) startMs = shift.start;
-    else if (alarms && alarms.length)
-      startMs = Math.max(...alarms.map(a => a.stop_time || 0));
+  const hasFrom = state.from != null, hasTo = state.to != null;
+  if (hasFrom || hasTo) {
+    // При фильтре — ровно указанный срез даты/времени.
+    let s = hasFrom ? state.from : state.to - 24 * 3600 * 1000;
+    let e = hasTo ? state.to : Math.max(Date.now(), s + 3600 * 1000);
+    if (e <= s) e = s + 3600 * 1000;
+    return { s, e };
   }
+  // Без дат — окно по дню смены/последней аварии: 08:00–08:00.
+  let startMs = null;
+  if (shift) startMs = shift.start;
+  else if (alarms && alarms.length)
+    startMs = Math.max(...alarms.map(a => a.stop_time || 0));
   if (startMs == null) return null;
-  if (endMs == null) endMs = startMs;
   const d0 = new Date(startMs); d0.setHours(0, 0, 0, 0);
-  const d1 = new Date(endMs); d1.setHours(0, 0, 0, 0);
   return { s: d0.getTime() + 8 * 3600 * 1000,
-           e: d1.getTime() + 32 * 3600 * 1000 };
+           e: d0.getTime() + 32 * 3600 * 1000 };
 }
 
 function tickStep(span) {
@@ -1901,7 +1904,7 @@ function drawChart() {
 
   const winStart = chartWin.s, winEnd = chartWin.e;
   const nowMs = Math.min(Date.now(), winEnd);
-  const multi = (winEnd - winStart) > 26 * 3600 * 1000;
+  const multi = (winEnd - winStart) > 12 * 3600 * 1000;
 
   let viewS = chartView ? chartView.s : winStart;
   let viewE = chartView ? chartView.e : winEnd;

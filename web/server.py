@@ -114,6 +114,16 @@ def now_ms():
     return int(time.time() * 1000)
 
 
+def capitalize_name(value):
+    """Фамилия с заглавной первой буквы (операторы/механики)."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return text
+    return text[0].upper() + text[1:]
+
+
 class EventStore:
     """Хранилище событий и проекция «случаи аварий» в SQLite3."""
 
@@ -163,6 +173,7 @@ class EventStore:
         ids = []
         with self._lock, self._session() as con:
             for event in events:
+                event["operator"] = capitalize_name(event.get("operator"))
                 ids.append(self._insert_event(con, event, received_at))
                 self._project(con, event, received_at)
         return ids
@@ -567,12 +578,8 @@ class EventStore:
         if shift_id is not None:
             shift_where += " AND shift_id = ?"
             shift_params.append(shift_id)
-        if date_from is not None:
-            shift_where += " AND COALESCE(device_time, received_at) >= ?"
-            shift_params.append(date_from)
-        if date_to is not None:
-            shift_where += " AND COALESCE(device_time, received_at) <= ?"
-            shift_params.append(date_to)
+        # Даты здесь не фильтруем: смена может начаться раньше периода и
+        # закончиться позже. Пересечение со окном считаем ниже.
 
         with self._session() as con:
             totals = con.execute(
@@ -620,10 +627,18 @@ class EventStore:
                 starts[key] = r["t"]
             elif r["type"] == "SHIFT_END":
                 ends[key] = r["t"]
+        # Суммарное время смен в пределах выбранного периода (с обрезкой).
         shift_total = 0
         for key, start in starts.items():
-            if start:
-                shift_total += max(0, (ends.get(key) or now) - start)
+            if not start:
+                continue
+            end = ends.get(key)
+            if end is None:
+                end = now
+            seg_start = max(start, date_from) if date_from is not None else start
+            seg_end = min(end, date_to) if date_to is not None else end
+            if seg_end > seg_start:
+                shift_total += seg_end - seg_start
         work = max(0, shift_total - as_int(totals["total_duration"]))
 
         return {
@@ -1398,6 +1413,8 @@ DASHBOARD = """<!doctype html>
                 vertical-align: middle; }
   .chart-legend .lg.work::before { background: #2e7d32; }
   .chart-legend .lg.alarm::before { background: #c62828; }
+  .chart-legend .lg.wash::before { background: #a371f7; }
+  .chart-legend .lg.active::before { background: #d29922; }
   #shiftChart { width: 100%; display: block; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #1e2631;
@@ -1414,6 +1431,8 @@ DASHBOARD = """<!doctype html>
   .badge.closed { background: #14532d; color: #c7f9d8; }
   .muted { color: #8b98a5; }
   #empty { color: #8b98a5; padding: 12px 0; }
+  .pager { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .pager .btn:disabled { opacity: .45; cursor: default; }
 </style>
 </head>
 <body>
@@ -1473,6 +1492,8 @@ DASHBOARD = """<!doctype html>
         <div class="chart-legend">
           <span class="lg work">В работе (+1)</span>
           <span class="lg alarm">Авария (-1)</span>
+          <span class="lg wash">Мойка (0)</span>
+          <span class="lg active">Авария активна, причина не выбрана (0)</span>
         </div>
         <div class="chart-tools">
           <span class="hint">колесо — масштаб, перетаскивание — сдвиг</span>
@@ -1499,6 +1520,7 @@ DASHBOARD = """<!doctype html>
       <a class="btn excel" id="export" href="/api/export.xlsx">Экспорт аварий в Excel</a>
     </div>
     <div id="allAlarms"></div>
+    <div class="pager" id="allPager"></div>
   </section>
 
   <section id="tab-shifts" style="display:none">
@@ -1512,6 +1534,9 @@ DASHBOARD = """<!doctype html>
 </main>
 <script>
 const state = { from: null, to: null, operator: '', mechanic: '' };
+const ALL_PAGE_SIZE = 50;
+let allAlarmsCache = [];
+let allPage = 0;
 
 const fmtTime = ms => ms ? new Date(ms).toLocaleString('ru-RU') : '—';
 const fmtClock = ms => {
@@ -1640,6 +1665,7 @@ function applyFilter() {
   state.to = to ? new Date(to).getTime() : null;
   state.operator = document.getElementById('operator').value;
   state.mechanic = document.getElementById('mechanic').value;
+  allPage = 0;
   loadFilters();
   refresh();
 }
@@ -1651,6 +1677,7 @@ function resetFilter() {
   state.to = null;
   state.operator = '';
   state.mechanic = '';
+  allPage = 0;
   loadFilters();
   refresh();
 }
@@ -1667,9 +1694,11 @@ function renderCards(sum) {
       <div class="label">Время в работе (за смены)</div></div>`;
 }
 
-function renderByCause(rows, shift) {
+function renderByCause(rows, shift, mode) {
   const label = document.getElementById('byCauseShift');
-  if (shift && shift.shift_id != null) {
+  if (mode === 'period') {
+    label.textContent = '— за выбранный период';
+  } else if (shift && shift.shift_id != null) {
     const who = [shift.operator, shift.mechanic].filter(Boolean).join(' · ');
     label.textContent = '— последняя смена' + (who ? ' (' + who + ')' : '') +
       (shift.start_time ? ', с ' + fmtTime(shift.start_time) : '');
@@ -1760,6 +1789,37 @@ function renderAlarmTable(elId, alarms, emptyText) {
   applyHighlight(elId);
 }
 
+function renderPager(elId, page, pages, total) {
+  const el = document.getElementById(elId);
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  const from = page * ALL_PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * ALL_PAGE_SIZE);
+  el.innerHTML =
+    '<button class="btn" ' + (page <= 0 ? 'disabled' : '') +
+      ' onclick="gotoAllPage(' + (page - 1) + ')">← Назад</button>' +
+    '<span class="muted"> ' + from + '–' + to + ' из ' + total +
+      ' (стр. ' + (page + 1) + '/' + pages + ') </span>' +
+    '<button class="btn" ' + (page >= pages - 1 ? 'disabled' : '') +
+      ' onclick="gotoAllPage(' + (page + 1) + ')">Вперёд →</button>';
+}
+
+function renderAllPage() {
+  const sorted = allAlarmsCache.slice().sort((a, b) =>
+    (a.closed - b.closed) || (b.stop_time - a.stop_time));
+  const pages = Math.max(1, Math.ceil(sorted.length / ALL_PAGE_SIZE));
+  if (allPage > pages - 1) allPage = pages - 1;
+  if (allPage < 0) allPage = 0;
+  const slice = sorted.slice(allPage * ALL_PAGE_SIZE,
+    allPage * ALL_PAGE_SIZE + ALL_PAGE_SIZE);
+  renderAlarmTable('allAlarms', slice, 'Аварий пока нет');
+  renderPager('allPager', allPage, pages, sorted.length);
+}
+
+function gotoAllPage(page) {
+  allPage = page;
+  renderAllPage();
+}
+
 async function refresh() {
   try {
     const qs = queryString();
@@ -1768,8 +1828,10 @@ async function refresh() {
       !!state.operator || !!state.mechanic;
     document.getElementById('export').href = '/api/export.xlsx' + qs;
     document.getElementById('exportShifts').href = '/api/export-shifts.xlsx' + qs;
+    const alarmsUrl = '/api/alarms' + (qs ? qs + '&limit=100000'
+      : '?limit=100000');
     const calls = [
-      j('/api/summary' + qs), j('/api/alarms' + qs),
+      j('/api/summary' + qs), j(alarmsUrl),
       j('/api/shift-events' + qs), j('/api/last-shift-causes' + qs),
       j('/api/current-shift')];
     if (!filtered) calls.push(j('/api/summary?shift=current'));
@@ -1777,9 +1839,13 @@ async function refresh() {
       await Promise.all(calls);
     const sum = filtered ? sumPeriod : sumShift;
     renderCards(sum);
-    renderByCause(lastCauses.by_cause, lastCauses.shift);
+    // «По причинам»: с фильтром — за выбранный период (сумма = «Всего случаев»),
+    // без фильтра — за текущую смену.
+    if (filtered) renderByCause(sumPeriod.by_cause, null, 'period');
+    else renderByCause(lastCauses.by_cause, lastCauses.shift, 'shift');
     renderByDay(sumPeriod.by_day);
-    renderAlarmTable('allAlarms', alarms.alarms, 'Аварий пока нет');
+    allAlarmsCache = alarms.alarms;
+    renderAllPage();
     renderShiftEvents(shifts.events);
 
     const shift = cur.shift;
@@ -1891,6 +1957,13 @@ function renderTimeline(alarms, win) {
   drawChart();
 }
 
+/* Мойка — любая причина, где в пути или тексте встречается слово «мойка»
+   (мойка/мойки/мойку и т.п.). */
+function isWash(a) {
+  const text = ((a.cause_path || '') + ' ' + (a.cause_text || '')).toLowerCase();
+  return text.includes('мойк');
+}
+
 function drawChart() {
   const svg = document.getElementById('shiftChart');
   const empty = document.getElementById('chartEmpty');
@@ -1915,7 +1988,9 @@ function drawChart() {
 
   const ints = chartAlarms
     .map(a => ({ s: a.stop_time, e: a.start_time || nowMs,
-                 dev: a.device_id, id: a.alarm_id }))
+                 dev: a.device_id, id: a.alarm_id,
+                 active: !a.closed && a.start_time == null,
+                 wash: isWash(a) }))
     .filter(x => x.s != null && x.e > x.s)
     .map(x => ({ ...x, s: Math.max(winStart, x.s), e: Math.min(nowMs, x.e) }))
     .filter(x => x.e > x.s)
@@ -1925,7 +2000,8 @@ function drawChart() {
   let cur = winStart;
   for (const iv of ints) {
     if (iv.s > cur) segs.push({ work: true, s: cur, e: iv.s });
-    segs.push({ work: false, s: Math.max(cur, iv.s), e: iv.e, dev: iv.dev, id: iv.id });
+    segs.push({ work: false, active: iv.active, wash: iv.wash,
+                s: Math.max(cur, iv.s), e: iv.e, dev: iv.dev, id: iv.id });
     cur = Math.max(cur, iv.e);
   }
   if (cur < nowMs) segs.push({ work: true, s: cur, e: nowMs });
@@ -1938,8 +2014,10 @@ function drawChart() {
   const plotW = W - padL - padR;
   const x = t => padL + (t - viewS) / span * plotW;
   const yv = v => mid - v * half;
-  const valOf = g => g.future ? 0 : (g.work ? 1 : -1);
-  const colorOf = g => g.future ? '#8b98a5' : (g.work ? '#2e7d32' : '#c62828');
+  const valOf = g => (g.future || g.active || g.wash) ? 0 : (g.work ? 1 : -1);
+  const colorOf = g => g.future ? '#8b98a5'
+    : (g.wash ? '#a371f7'
+      : (g.active ? '#d29922' : (g.work ? '#2e7d32' : '#c62828')));
   chartGeom = { padL, plotW, viewS, viewE, winStart, winEnd };
 
   const p = [];
@@ -1960,6 +2038,15 @@ function drawChart() {
     const x0 = x(g.s).toFixed(1), x1 = x(g.e).toFixed(1);
     if (g.future) {
       body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="1.4" stroke-dasharray="4 3"/>`);
+    } else if (g.wash) {
+      const tip = 'Мойка ' + fmtClock(g.s) + '–' + fmtClock(g.e) +
+        ' — нажмите, чтобы показать в таблице';
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="transparent" stroke-width="16" style="cursor:pointer" onclick="focusAlarm('${g.dev}','${g.id}')"><title>${tip}</title></line>`);
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.6" pointer-events="none"/>`);
+    } else if (g.active) {
+      const tip = 'Авария активна, причина не выбрана — с ' + fmtClock(g.s);
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="transparent" stroke-width="16" style="cursor:pointer" onclick="focusAlarm('${g.dev}','${g.id}')"><title>${tip}</title></line>`);
+      body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.8" stroke-dasharray="5 3" pointer-events="none"/>`);
     } else if (g.work) {
       body.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${colorOf(g)}" stroke-width="2.2"/>`);
     } else {

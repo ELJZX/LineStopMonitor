@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    image: linestop-web:latest
+    container_name: linestop-web
+    ports:
+      - "7777:7777"
+    volumes:
+      # Данные (SQLite) остаются на хосте, в web/linestop_web.db
+      - ./web:/data
+      # APK для кнопки «Скачать APK»
+      - ./app/build/outputs/apk/debug:/apk:ro
+    restart: unless-stopped

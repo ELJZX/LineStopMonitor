@@ -1,0 +1,9 @@
+.git
+.gitignore
+app/build
+**/__pycache__
+**/*.pyc
+web/linestop_web.db
+docs
+presentation
+*.md
